@@ -42,10 +42,17 @@ class SchedulingView:
         current_month = datetime.now().month
         current_year = datetime.now().year
         
+        # Italian month names
+        italian_months = {
+            1: "Gennaio", 2: "Febbraio", 3: "Marzo", 4: "Aprile",
+            5: "Maggio", 6: "Giugno", 7: "Luglio", 8: "Agosto",
+            9: "Settembre", 10: "Ottobre", 11: "Novembre", 12: "Dicembre"
+        }
+        
         month = st.selectbox(
             "Mese di Pianificazione",
             options=range(1, 13),
-            format_func=lambda m: calendar.month_name[m],
+            format_func=lambda m: italian_months[m],
             index=current_month - 1,
             key="month_selector"
         )
@@ -72,7 +79,7 @@ class SchedulingView:
         )
         
         num_freelancers = st.number_input(
-            "Numero di Freelancer",
+            "Numero di Liberi Professionisti",
             min_value=0,
             max_value=10,
             value=2,
@@ -216,7 +223,7 @@ class SchedulingView:
             weeks.append(current_week)
             
         # Create tabs for nurses and freelancers
-        tab_labels = [f"Infermiere {i+1}" for i in range(num_nurses)] + [f"Freelancer {i+1}" for i in range(num_freelancers)]
+        tab_labels = [f"Infermiere {i+1}" for i in range(num_nurses)] + [f"Libero Professionista {i+1}" for i in range(num_freelancers)]
         nurse_tabs = st.tabs(tab_labels)
         
         # Initialize preferences in session state if not already present
@@ -317,7 +324,7 @@ class SchedulingView:
         # Process freelancer availability
         for freelancer_idx in range(num_freelancers):
             with nurse_tabs[num_nurses + freelancer_idx]:
-                # st.subheader(f"Disponibilità Freelancer {freelancer_idx+1}")
+                # st.subheader(f"Disponibilità Libero Professionista {freelancer_idx+1}")
                 st.write("Seleziona la disponibilità per i turni: spunta le caselle per indicare disponibilità")
                 
                 # Instructions
@@ -568,7 +575,7 @@ class SchedulingView:
                     
                     # Count shifts
                     for d in range(len(schedule_df)):
-                        freelancer_col = f"Freelancer {f_idx+1}"
+                        freelancer_col = f"Libero Professionista {f_idx+1}"
                         if freelancer_col in schedule_df.columns:
                             shift_value = schedule_df.iloc[d][freelancer_col]
                             if shift_value == "Mattino":
@@ -591,7 +598,7 @@ class SchedulingView:
                     
                     # Add to summary
                     freelancer_summary_data.append({
-                        'Libero Professionista': f"Freelancer {f_idx + 1}",
+                        'Libero Professionista': f"Libero Professionista {f_idx + 1}",
                         'Turni Totali': total_shifts,
                         'Turni Mattina': morning_shifts,
                         'Turni Pomeriggio': afternoon_shifts,

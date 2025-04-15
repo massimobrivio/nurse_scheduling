@@ -240,7 +240,7 @@ class SchedulingModel:
                 
                 # Add freelancers as columns
                 for f_idx, f in enumerate(range(self.num_nurses, self.num_nurses + self.num_freelancers)):
-                    employee_name = f"Freelancer {f_idx+1}"
+                    employee_name = f"Libero Professionista {f_idx+1}"
                     if solver.value(shifts[(f, d, 0)]) == 1:  # Morning shift
                         row_data[employee_name] = "Mattino"
                     elif solver.value(shifts[(f, d, 1)]) == 1:  # Afternoon shift
