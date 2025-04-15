@@ -190,6 +190,9 @@ class SchedulingView:
             'Sunday': 'Domenica'
         }
         
+        # Short day names for display
+        short_day_names = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom']
+        
         # Generate calendar for the month
         num_days = calendar.monthrange(year, month)[1]
         dates = []
@@ -198,9 +201,22 @@ class SchedulingView:
             dates.append({
                 'date': date,
                 'date_str': date.strftime('%d/%m/%Y'),
-                'day_name': day_mapping.get(date.strftime('%A'), date.strftime('%A'))
+                'day_name': day_mapping.get(date.strftime('%A'), date.strftime('%A')),
+                'day': day,
+                'weekday': date.weekday()  # 0=Monday, 6=Sunday
             })
         
+        # Group dates by week
+        weeks = []
+        current_week = []
+        for date_info in dates:
+            if date_info['weekday'] == 0 and current_week:  # Monday
+                weeks.append(current_week)
+                current_week = []
+            current_week.append(date_info)
+        if current_week:
+            weeks.append(current_week)
+            
         # Create tabs for nurses and freelancers
         tab_labels = [f"Infermiere {i+1}" for i in range(num_nurses)] + [f"Freelancer {i+1}" for i in range(num_freelancers)]
         nurse_tabs = st.tabs(tab_labels)
@@ -226,110 +242,154 @@ class SchedulingView:
             }
         
         # Process nurse preferences
-        for i in range(num_nurses):
-            with nurse_tabs[i]:
-                st.subheader(f"Preferenze Infermiere {i+1}")
-                st.write("Seleziona le preferenze per i turni: 0 = Indifferente, 1 = Preferito")
+        for nurse_idx in range(num_nurses):
+            with nurse_tabs[nurse_idx]:
+                # st.subheader(f"Preferenze Infermiere {nurse_idx+1}")
+                st.write("Seleziona le preferenze per i turni: spunta le caselle per indicare i turni preferiti")
                 
-                # Create fresh DataFrame for the nurse's preferences
-                key = f"nurse_{i}_pref_df_{month}_{year}"
-                if key not in st.session_state:
-                    data = []
-                    for date_info in dates:
-                        data.append({
-                            'Data': date_info['date_str'],
-                            'Giorno': date_info['day_name'],
-                            'Turno Mattina (M)': 0,
-                            'Turno Pomeriggio (P)': 0
-                        })
-                    st.session_state[key] = pd.DataFrame(data)
+                # Instructions
+                st.markdown("""
+                - **M**: Turno Mattina
+                - **P**: Turno Pomeriggio
+                """)
                 
-                # Display and edit the DataFrame
-                edited_df = st.data_editor(
-                    st.session_state[key],
-                    disabled=['Data', 'Giorno'],
-                    column_config={
-                        'Data': st.column_config.TextColumn(width="small"),
-                        'Giorno': st.column_config.TextColumn(width="small"),
-                        'Turno Mattina (M)': st.column_config.SelectboxColumn(
-                            options=[0, 1],
-                            width="medium"
-                        ),
-                        'Turno Pomeriggio (P)': st.column_config.SelectboxColumn(
-                            options=[0, 1],
-                            width="medium"
-                        )
-                    },
-                    hide_index=True,
-                    key=f"nurse_pref_editor_{i}_{month}_{year}"
-                )
-                
-                # Update the session state
-                st.session_state[key] = edited_df
-                
-                # Convert DataFrame to the format needed by the model
-                preferences = {}
-                for idx, row in edited_df.iterrows():
-                    day = idx + 1  # Days are 1-indexed in our model
-                    if row['Turno Mattina (M)'] == 1:
-                        preferences[(day, 'M')] = 1
-                    if row['Turno Pomeriggio (P)'] == 1:
-                        preferences[(day, 'P')] = 1
-                
-                st.session_state.nurse_preferences[i] = preferences
+                # Display calendar by week
+                for week_idx, week in enumerate(weeks):
+                    st.write(f"**Settimana {week_idx+1}**")
+                    
+                    # Create header row with day names
+                    cols = st.columns(7)
+                    for i, day_name in enumerate(short_day_names):
+                        with cols[i]:
+                            st.markdown(f"**{day_name}**", help=f"{list(day_mapping.values())[i]}")
+                    
+                    # Create one row for days
+                    cols = st.columns(7)
+                    
+                    # Fill in empty columns for first week if needed
+                    day_slots_used = 0
+                    first_day_weekday = week[0]['weekday']
+                    for i in range(first_day_weekday):
+                        with cols[i]:
+                            st.write("")
+                        day_slots_used += 1
+                    
+                    # Display each day
+                    for day_info in week:
+                        day_num = day_info['day']
+                        weekday = day_info['weekday']
+                        
+                        with cols[weekday]:
+                            # Format weekends with different style
+                            if weekday >= 5:  # Saturday and Sunday
+                                st.markdown(f"<span style='color:red'><b>{day_num}</b></span>", unsafe_allow_html=True)
+                            else:
+                                st.write(f"**{day_num}**")
+                            
+                            # Morning preference
+                            morning_key = f"nurse_{nurse_idx}_morning_{day_num}_{month}_{year}"
+                            morning_pref = (day_num, 'M') in st.session_state.nurse_preferences[nurse_idx]
+                            morning = st.checkbox("M", key=morning_key, value=morning_pref)
+                            
+                            # Afternoon preference
+                            afternoon_key = f"nurse_{nurse_idx}_afternoon_{day_num}_{month}_{year}"
+                            afternoon_pref = (day_num, 'P') in st.session_state.nurse_preferences[nurse_idx]
+                            afternoon = st.checkbox("P", key=afternoon_key, value=afternoon_pref)
+                            
+                            # Update preferences
+                            if morning:
+                                st.session_state.nurse_preferences[nurse_idx][(day_num, 'M')] = 1
+                            else:
+                                st.session_state.nurse_preferences[nurse_idx].pop((day_num, 'M'), None)
+                                
+                            if afternoon:
+                                st.session_state.nurse_preferences[nurse_idx][(day_num, 'P')] = 1
+                            else:
+                                st.session_state.nurse_preferences[nurse_idx].pop((day_num, 'P'), None)
+                        
+                        day_slots_used += 1
+                    
+                    # Fill in empty columns for last week if needed
+                    for i in range(day_slots_used, 7):
+                        with cols[i]:
+                            st.write("")
+                    
+                    st.write("---")  # Separator between weeks
         
         # Process freelancer availability
-        for i in range(num_freelancers):
-            with nurse_tabs[num_nurses + i]:
-                st.subheader(f"Disponibilità Freelancer {i+1}")
-                st.write("Seleziona la disponibilità per i turni: 0 = Non Disponibile, 1 = Disponibile")
+        for freelancer_idx in range(num_freelancers):
+            with nurse_tabs[num_nurses + freelancer_idx]:
+                # st.subheader(f"Disponibilità Freelancer {freelancer_idx+1}")
+                st.write("Seleziona la disponibilità per i turni: spunta le caselle per indicare disponibilità")
                 
-                # Create fresh DataFrame for the freelancer's availability
-                key = f"freelancer_{i}_avail_df_{month}_{year}"
-                if key not in st.session_state:
-                    data = []
-                    for date_info in dates:
-                        data.append({
-                            'Data': date_info['date_str'],
-                            'Giorno': date_info['day_name'],
-                            'Turno Mattina (M)': 0,
-                            'Turno Pomeriggio (P)': 0
-                        })
-                    st.session_state[key] = pd.DataFrame(data)
+                # Instructions
+                st.markdown("""
+                - **M**: Turno Mattina
+                - **P**: Turno Pomeriggio
+                """)
                 
-                # Display and edit the DataFrame
-                edited_df = st.data_editor(
-                    st.session_state[key],
-                    disabled=['Data', 'Giorno'],
-                    column_config={
-                        'Data': st.column_config.TextColumn(width="small"),
-                        'Giorno': st.column_config.TextColumn(width="small"),
-                        'Turno Mattina (M)': st.column_config.SelectboxColumn(
-                            options=[0, 1],
-                            width="medium"
-                        ),
-                        'Turno Pomeriggio (P)': st.column_config.SelectboxColumn(
-                            options=[0, 1],
-                            width="medium"
-                        )
-                    },
-                    hide_index=True,
-                    key=f"freelancer_avail_editor_{i}_{month}_{year}"
-                )
-                
-                # Update the session state
-                st.session_state[key] = edited_df
-                
-                # Convert DataFrame to the format needed by the model
-                availability = {}
-                for idx, row in edited_df.iterrows():
-                    day = idx + 1  # Days are 1-indexed in our model
-                    if row['Turno Mattina (M)'] == 1:
-                        availability[(day, 'M')] = 1
-                    if row['Turno Pomeriggio (P)'] == 1:
-                        availability[(day, 'P')] = 1
-                
-                st.session_state.freelancer_availability[i] = availability
+                # Display calendar by week
+                for week_idx, week in enumerate(weeks):
+                    st.write(f"**Settimana {week_idx+1}**")
+                    
+                    # Create header row with day names
+                    cols = st.columns(7)
+                    for i, day_name in enumerate(short_day_names):
+                        with cols[i]:
+                            st.markdown(f"**{day_name}**", help=f"{list(day_mapping.values())[i]}")
+                    
+                    # Create one row for days
+                    cols = st.columns(7)
+                    
+                    # Fill in empty columns for first week if needed
+                    day_slots_used = 0
+                    first_day_weekday = week[0]['weekday']
+                    for i in range(first_day_weekday):
+                        with cols[i]:
+                            st.write("")
+                        day_slots_used += 1
+                    
+                    # Display each day
+                    for day_info in week:
+                        day_num = day_info['day']
+                        weekday = day_info['weekday']
+                        
+                        with cols[weekday]:
+                            # Format weekends with different style
+                            if weekday >= 5:  # Saturday and Sunday
+                                st.markdown(f"<span style='color:red'><b>{day_num}</b></span>", unsafe_allow_html=True)
+                            else:
+                                st.write(f"**{day_num}**")
+                            
+                            # Morning availability
+                            morning_key = f"freelancer_{freelancer_idx}_morning_{day_num}_{month}_{year}"
+                            morning_avail = (day_num, 'M') in st.session_state.freelancer_availability[freelancer_idx]
+                            morning = st.checkbox("M", key=morning_key, value=morning_avail)
+                            
+                            # Afternoon availability
+                            afternoon_key = f"freelancer_{freelancer_idx}_afternoon_{day_num}_{month}_{year}"
+                            afternoon_avail = (day_num, 'P') in st.session_state.freelancer_availability[freelancer_idx]
+                            afternoon = st.checkbox("P", key=afternoon_key, value=afternoon_avail)
+                            
+                            # Update availability
+                            if morning:
+                                st.session_state.freelancer_availability[freelancer_idx][(day_num, 'M')] = 1
+                            else:
+                                st.session_state.freelancer_availability[freelancer_idx].pop((day_num, 'M'), None)
+                                
+                            if afternoon:
+                                st.session_state.freelancer_availability[freelancer_idx][(day_num, 'P')] = 1
+                            else:
+                                st.session_state.freelancer_availability[freelancer_idx].pop((day_num, 'P'), None)
+                        
+                        day_slots_used += 1
+                    
+                    # Fill in empty columns for last week if needed
+                    for i in range(day_slots_used, 7):
+                        with cols[i]:
+                            st.write("")
+                    
+                    st.write("---")  # Separator between weeks
     
     def show_results_tab(self):
         """Show the results tab UI"""
