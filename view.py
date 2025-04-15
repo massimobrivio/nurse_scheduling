@@ -551,6 +551,76 @@ class SchedulingView:
                 key="summary_dataframe"
             )
             
+            # Create and display freelancers summary table
+            if config['num_freelancers'] > 0:
+                st.subheader("Riepilogo per Liberi Professionisti")
+                
+                # Create summary data for freelancers
+                freelancer_summary_data = []
+                
+                # Calculate total hours and shifts for each freelancer
+                for f_idx in range(config['num_freelancers']):
+                    # Calculate freelancer ID - though not needed, we'll keep for clarity
+                    freelancer_id = config['num_nurses'] + f_idx
+                    
+                    total_shifts = 0
+                    total_hours = 0
+                    morning_shifts = 0
+                    afternoon_shifts = 0
+                    
+                    # Count shifts
+                    for d in range(len(schedule_df)):
+                        freelancer_col = f"Freelancer {f_idx+1}"
+                        if freelancer_col in schedule_df.columns:
+                            shift_value = schedule_df.iloc[d][freelancer_col]
+                            if shift_value == "Mattino":
+                                total_shifts += 1
+                                morning_shifts += 1
+                                total_hours += 8  # Assuming 8 hours per shift
+                            elif shift_value == "Pomeriggio":
+                                total_shifts += 1
+                                afternoon_shifts += 1
+                                total_hours += 8  # Assuming 8 hours per shift
+                    
+                    # Calculate availability usage
+                    available_slots = 0
+                    if f_idx in st.session_state.freelancer_availability:
+                        available_slots = len(st.session_state.freelancer_availability[f_idx])
+                    
+                    availability_usage = 0
+                    if available_slots > 0:
+                        availability_usage = round((total_shifts / available_slots) * 100, 1)
+                    
+                    # Add to summary
+                    freelancer_summary_data.append({
+                        'Libero Professionista': f"Freelancer {f_idx + 1}",
+                        'Turni Totali': total_shifts,
+                        'Turni Mattina': morning_shifts,
+                        'Turni Pomeriggio': afternoon_shifts,
+                        'Ore Totali': total_hours,
+                        'Disponibilità Usata (%)': availability_usage
+                    })
+                
+                freelancer_summary_df = pd.DataFrame(freelancer_summary_data)
+                
+                # Display freelancer summary table
+                st.dataframe(
+                    freelancer_summary_df,
+                    column_config={
+                        'Libero Professionista': st.column_config.TextColumn(width="medium"),
+                        'Turni Totali': st.column_config.NumberColumn(width="small"),
+                        'Turni Mattina': st.column_config.NumberColumn(width="small"),
+                        'Turni Pomeriggio': st.column_config.NumberColumn(width="small"),
+                        'Ore Totali': st.column_config.NumberColumn(format="%d ore", width="small"),
+                        'Disponibilità Usata (%)': st.column_config.NumberColumn(
+                            format="%.1f%%",
+                            help="Percentuale di turni assegnati rispetto alla disponibilità indicata"
+                        )
+                    },
+                    hide_index=True,
+                    key="freelancer_summary_dataframe"
+                )
+            
             # Export options
             col1, col2 = st.columns(2)
             
