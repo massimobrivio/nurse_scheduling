@@ -344,8 +344,39 @@ class SchedulingView:
         
         if solve_button:
             with st.spinner("Calcolo in corso..."):
-                # Signal to controller to solve the model
-                st.session_state.solve_requested = True
+                # Instead of just setting a flag, solve the model directly
+                from model import SchedulingModel
+                
+                model = SchedulingModel()
+                config = st.session_state.config
+                
+                try:
+                    # Setup the model
+                    model.setup_model(
+                        year=config['year'],
+                        month=config['month'],
+                        num_nurses=config['num_nurses'],
+                        num_freelancers=config['num_freelancers'],
+                        nurse_hours=config['nurse_hours'],
+                        min_free_weekends=config['min_free_weekends'],
+                        max_consecutive_days=config['max_consecutive_days'],
+                        nurse_preferences=st.session_state.nurse_preferences,
+                        freelancer_availability=st.session_state.freelancer_availability,
+                        hours_flexibility=config.get('hours_flexibility', 8)
+                    )
+                    
+                    # Solve the problem
+                    success, schedule_df, hours_worked, free_weekends = model.solve()
+                    
+                    # Store the result
+                    st.session_state.schedule_result = (success, schedule_df, hours_worked, free_weekends)
+                    
+                    # Force a rerun to show the results
+                    st.rerun()
+                
+                except Exception as e:
+                    st.error(f"Errore durante la pianificazione: {str(e)}")
+                    st.session_state.schedule_result = (False, None, None, None)
         
         # Display results if available
         if 'schedule_result' in st.session_state and st.session_state.schedule_result[0]:
