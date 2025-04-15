@@ -101,7 +101,7 @@ class SchedulingView:
             "Massimo Giorni Consecutivi di Lavoro",
             min_value=1,
             max_value=6,
-            value=5,
+            value=4,
             key="max_consecutive_days_slider"
         )
         
@@ -118,11 +118,11 @@ class SchedulingView:
         
         # Store nurse hours in session state
         if 'nurse_hours' not in st.session_state:
-            st.session_state.nurse_hours = {i: 165 for i in range(num_nurses)}
+            st.session_state.nurse_hours = {i: 160 for i in range(num_nurses)}
         
         # Update session state if number of nurses changes
         if len(st.session_state.nurse_hours) != num_nurses:
-            st.session_state.nurse_hours = {i: 165 for i in range(num_nurses)}
+            st.session_state.nurse_hours = {i: 160 for i in range(num_nurses)}
         
         # Display input fields for each nurse's hours
         for i in range(num_nurses):
@@ -130,7 +130,7 @@ class SchedulingView:
                 f"Ore Mensili Infermiere {i+1}",
                 min_value=80,
                 max_value=200,
-                value=st.session_state.nurse_hours.get(i, 165),
+                value=st.session_state.nurse_hours.get(i, 160),
                 key=f"nurse_hours_{i}"
             )
         
