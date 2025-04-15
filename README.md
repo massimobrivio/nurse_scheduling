@@ -1,71 +1,58 @@
-# Sistema di Pianificazione Turni Infermieri
+# Pianificazione Turni Infermieri
 
-Un'applicazione Streamlit per la pianificazione automatica dei turni degli infermieri utilizzando OR-Tools.
+Questa applicazione Streamlit permette di pianificare i turni mensili per infermieri e freelancer in base a preferenze, disponibilità e vincoli specifici.
 
 ## Funzionalità
 
-- Pianificazione automatica dei turni mensili per gli infermieri
-- Supporto per preferenze degli infermieri
-- Analisi dettagliata della pianificazione
-- Rispetto dei vincoli legali (max 6 giorni consecutivi di lavoro)
-- Visualizzazione grafica della distribuzione dei turni
-- Esportazione della pianificazione in formato CSV ed Excel
+- Configurazione del numero di infermieri e freelancer
+- Impostazione di vincoli come weekend liberi e giorni consecutivi di lavoro
+- Inserimento delle preferenze per gli infermieri
+- Inserimento delle disponibilità per i freelancer
+- Generazione automatica della pianificazione mensile
+- Esportazione della pianificazione in Excel e CSV
 
 ## Requisiti
 
-L'applicazione richiede Python 3.7+ e le seguenti librerie:
-
-- streamlit
-- ortools
-- pandas
-- numpy
-- plotly
-- openpyxl
+- Python 3.8 o superiore
+- Pacchetti Python necessari (vedi requirements.txt)
 
 ## Installazione
 
-1. Clona il repository:
-```
-git clone https://github.com/yourusername/nurse_scheduling.git
-cd nurse_scheduling
-```
-
+1. Clona questo repository o scarica i file
 2. Installa le dipendenze:
-```
+
+```bash
 pip install -r requirements.txt
 ```
 
 ## Utilizzo
 
 1. Avvia l'applicazione:
-```
+
+```bash
 streamlit run controller.py
 ```
 
-2. Nell'interfaccia web:
-   - Imposta il numero di infermieri
-   - Seleziona anno e mese per la pianificazione
-   - Inserisci le preferenze degli infermieri nella scheda "Preferenze"
-   - Clicca su "Genera Pianificazione" per creare il piano turni
-   - Visualizza e analizza la pianificazione nelle schede "Pianificazione" e "Analisi"
-   - Scarica la pianificazione in formato CSV o Excel
+2. Nel browser, segui questi passaggi:
+   - Configura i parametri di base nella scheda "Configurazione"
+   - Inserisci le preferenze degli infermieri e le disponibilità dei freelancer nella scheda "Preferenze e Disponibilità"
+   - Genera la pianificazione dalla scheda "Risultati"
+   - Esporta i risultati in Excel o CSV
 
-## Struttura MVC
+## Note Tecniche
 
-L'applicazione segue il pattern Model-View-Controller:
+- L'applicazione utilizza OR-Tools di Google per risolvere il problema di ottimizzazione
+- Segue l'architettura Model-View-Controller (MVC)
+- I file principali sono:
+  - `model.py`: Logica di ottimizzazione e gestione dei dati
+  - `view.py`: Interfaccia utente Streamlit
+  - `controller.py`: Coordinamento tra modello e vista
 
-- **Model** (`model.py`): Contiene la logica di pianificazione e risoluzione dei vincoli utilizzando OR-Tools
-- **View** (`view.py`): Gestisce l'interfaccia utente con Streamlit
-- **Controller** (`controller.py`): Coordina le interazioni tra modello e vista, gestisce lo stato dell'applicazione
+## Vincoli Implementati
 
-## Vincoli implementati
-
-- Massimo 6 giorni consecutivi di lavoro
-- Nessun passaggio da turno pomeridiano a turno mattutino
-- Almeno due weekend liberi al mese per ogni infermiere
-- Distribuzione equa del carico di lavoro
-- Ottimizzazione delle preferenze degli infermieri
-
-## Licenza
-
-Questo progetto è disponibile con licenza MIT. 
+- Massimo numero di giorni consecutivi di lavoro
+- Minimo numero di weekend liberi per infermiere
+- Rispetto delle ore contrattuali mensili degli infermieri
+- Nessun turno pomeridiano seguito da turno mattutino il giorno successivo
+- Rispetto delle disponibilità dei freelancer
+- Massimizzazione delle preferenze degli infermieri 

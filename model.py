@@ -1,358 +1,458 @@
 from ortools.sat.python import cp_model
-import pandas as pd
-import calendar
 from datetime import datetime, timedelta
+import calendar
+import pandas as pd
 import numpy as np
+from typing import List, Dict, Tuple, Optional
 
-class NurseSchedulingModel:
+class SchedulingModel:
     def __init__(self):
-        # Dati predefiniti
-        self.num_nurses = 3
-        self.num_shifts = 2  # Mattino (M): 6:00-14:00, Pomeriggio (P): 14:00-22:00
-        self.shift_duration = 8  # ore
-        self.monthly_contracted_hours = 165  # Ore mensili contrattuali
-        self.max_hour_deviation = 8  # Deviazione massima consentita dalle ore contrattuali (±8 ore)
-        self.preferences = {}  # Preferenze delle infermiere
+        self.num_nurses = 0
+        self.num_freelancers = 0
+        self.nurse_hours = {}  # Dictionary mapping nurse ID to contracted hours
+        self.shift_duration = 8  # Default shift duration in hours
+        self.shifts = ["M", "P"]  # M: morning, P: afternoon
+        self.year = datetime.now().year
+        self.month = datetime.now().month
+        self.num_days = 0
+        self.min_free_weekends = 1  # Minimum free weekends per nurse
+        self.max_consecutive_days = 5  # Maximum consecutive workdays
+        self.nurse_preferences = {}  # Dictionary mapping nurse ID to their preferences
+        self.freelancer_availability = {}  # Dictionary mapping freelancer ID to their availability
+        self.hours_flexibility = 8  # Allow 8 hours of flexibility (one shift) above or below contracted hours
 
-    def generate_calendar(self, date_start, date_end):
-        """Genera un calendario per il periodo specificato"""
-        if isinstance(date_start, str):
-            date_start = datetime.strptime(date_start, "%Y-%m-%d").date()
-        if isinstance(date_end, str):
-            date_end = datetime.strptime(date_end, "%Y-%m-%d").date()
-            
-        num_days = (date_end - date_start).days + 1
-        dates = [(date_start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(num_days)]
-        return dates, num_days
-
-    def solve_schedule(self, date_start, date_end, min_free_weekends=2, max_consecutive_days=6, nurse_preferences=None):
-        """Risolve il problema di pianificazione per il periodo specificato
+    def setup_model(self, year: int, month: int, num_nurses: int, num_freelancers: int, 
+                   nurse_hours: Dict[int, int], min_free_weekends: int, max_consecutive_days: int,
+                   nurse_preferences: Dict[int, Dict[Tuple[int, str], int]], 
+                   freelancer_availability: Dict[int, Dict[Tuple[int, str], int]],
+                   hours_flexibility: int = 8):
+        """Setup the model with the provided parameters"""
+        self.year = year
+        self.month = month
+        self.num_nurses = num_nurses
+        self.num_freelancers = num_freelancers
+        self.nurse_hours = nurse_hours
+        self.min_free_weekends = min_free_weekends
+        self.max_consecutive_days = max_consecutive_days
+        self.nurse_preferences = nurse_preferences
+        self.freelancer_availability = freelancer_availability
+        self.hours_flexibility = hours_flexibility
         
-        Args:
-            date_start: Data di inizio pianificazione (formato YYYY-MM-DD o oggetto datetime.date)
-            date_end: Data di fine pianificazione (formato YYYY-MM-DD o oggetto datetime.date)
-            min_free_weekends: Numero minimo di weekend liberi per ogni infermiere
-            max_consecutive_days: Numero massimo di giorni consecutivi di lavoro
-            nurse_preferences: Dizionario di preferenze delle infermiere
-        """
-        # Converti le date in oggetti datetime se sono stringhe
-        if isinstance(date_start, str):
-            date_start = datetime.strptime(date_start, "%Y-%m-%d").date()
-        if isinstance(date_end, str):
-            date_end = datetime.strptime(date_end, "%Y-%m-%d").date()
-            
-        dates, num_days = self.generate_calendar(date_start, date_end)
-        all_nurses = range(self.num_nurses)
-        all_shifts = range(self.num_shifts)
-        all_days = range(num_days)
+        # Calculate the number of days in the month
+        self.num_days = calendar.monthrange(year, month)[1]
         
-        # Calcola le ore contrattuali pro-rata per il periodo di pianificazione
-        # (es. se pianifichiamo 15 giorni su un mese di 30, le ore contrattuali sarebbero 165/2 = 82.5)
-        days_in_month = calendar.monthrange(date_start.year, date_start.month)[1]
-        if date_start.month == date_end.month and date_start.year == date_end.year:
-            # Stesso mese
-            period_ratio = num_days / days_in_month
-        else:
-            # Periodo su più mesi, usiamo 30 giorni come approssimazione
-            period_ratio = num_days / 30
+    def get_weekend_days(self) -> List[Tuple[int, int]]:
+        """Return a list of weekend day pairs (Saturday, Sunday) for the month"""
+        weekend_pairs = []
         
-        target_hours = round(self.monthly_contracted_hours * period_ratio)
-        min_hours = max(0, target_hours - self.max_hour_deviation)
-        max_hours = target_hours + self.max_hour_deviation
+        for day in range(1, self.num_days + 1):
+            date = datetime(self.year, self.month, day)
+            # If it's Saturday (5), check if the next day exists and is Sunday
+            if date.weekday() == 5 and day + 1 <= self.num_days:
+                next_date = datetime(self.year, self.month, day + 1)
+                if next_date.weekday() == 6:  # Sunday
+                    # Convert to 0-indexed for the model
+                    weekend_pairs.append((day - 1, day))
         
-        # Crea il modello
+        return weekend_pairs
+    
+    def solve(self) -> Tuple[bool, Optional[pd.DataFrame], Optional[Dict[int, int]], Optional[Dict[int, int]]]:
+        """Solve the nurse scheduling problem and return the result"""
         model = cp_model.CpModel()
         
-        # Crea le variabili
+        all_nurses = range(self.num_nurses)
+        all_freelancers = range(self.num_freelancers)
+        all_employees = range(self.num_nurses + self.num_freelancers)
+        all_days = range(self.num_days)
+        all_shifts = range(len(self.shifts))
+        
+        # Create shift variables
+        # shifts[(e, d, s)]: employee 'e' works shift 's' on day 'd'
         shifts = {}
-        for n in all_nurses:
+        for e in all_employees:
             for d in all_days:
                 for s in all_shifts:
-                    shifts[(n, d, s)] = model.new_bool_var(f"shift_n{n}_d{d}_s{s}")
+                    shifts[(e, d, s)] = model.new_bool_var(f"shift_e{e}_d{d}_s{s}")
         
-        # Ogni turno è assegnato esattamente a un'infermiera
+        # Each shift each day needs exactly one employee
         for d in all_days:
             for s in all_shifts:
-                model.add_exactly_one(shifts[(n, d, s)] for n in all_nurses)
+                model.add_exactly_one(shifts[(e, d, s)] for e in all_employees)
         
-        # Ogni infermiera lavora al massimo un turno al giorno
-        for n in all_nurses:
+        # Each employee works at most one shift per day
+        for e in all_employees:
             for d in all_days:
-                model.add_at_most_one(shifts[(n, d, s)] for s in all_shifts)
+                model.add_at_most_one(shifts[(e, d, s)] for s in all_shifts)
         
-        # Calcola il numero di turni e ore per ogni infermiera
-        nurse_shifts = []
-        nurse_hours = []
-        hours_deviation = []
-        
+        # Ensure nurse contracted hours with flexibility
         for n in all_nurses:
-            shifts_worked = []
+            worked_hours = sum(shifts[(n, d, s)] * self.shift_duration 
+                             for d in all_days for s in all_shifts)
+            target_hours = self.nurse_hours[n]
+            
+            # Allow flexibility within a range
+            model.add(worked_hours >= target_hours - self.hours_flexibility)
+            model.add(worked_hours <= target_hours + self.hours_flexibility)
+        
+        # Freelancers can only work when available
+        for f_idx, f in enumerate(range(self.num_nurses, self.num_nurses + self.num_freelancers)):
             for d in all_days:
                 for s in all_shifts:
-                    shifts_worked.append(shifts[(n, d, s)])
-            
-            # Crea una variabile per il numero totale di turni lavorati da ogni infermiera
-            total_shifts = len(all_days) * len(all_shifts)
-            nurse_total_shifts = model.new_int_var(0, total_shifts, f"nurse_{n}_total_shifts")
-            model.add(nurse_total_shifts == sum(shifts_worked))
-            nurse_shifts.append(nurse_total_shifts)
-            
-            # Calcola le ore totali lavorate
-            nurse_total_hours = model.new_int_var(min_hours, max_hours, f"nurse_{n}_total_hours")
-            model.add(nurse_total_hours == nurse_total_shifts * self.shift_duration)
-            nurse_hours.append(nurse_total_hours)
-            
-            # Calcola la deviazione dalle ore target
-            deviation_pos = model.new_int_var(0, self.max_hour_deviation, f"nurse_{n}_deviation_pos")
-            deviation_neg = model.new_int_var(0, self.max_hour_deviation, f"nurse_{n}_deviation_neg")
-            
-            model.add(nurse_total_hours == target_hours + deviation_pos - deviation_neg)
-            hours_deviation.append(deviation_pos + deviation_neg)
+                    day_key = (d + 1, self.shifts[s])  # Convert to 1-indexed days
+                    if day_key not in self.freelancer_availability[f_idx] or self.freelancer_availability[f_idx][day_key] == 0:
+                        model.add(shifts[(f, d, s)] == 0)
         
-        # Distribuisci equamente i turni tra le infermiere
-        for i in range(len(all_nurses)):
-            for j in range(i + 1, len(all_nurses)):
-                # La differenza nel numero di turni tra due infermiere è al massimo 1
-                model.add((nurse_shifts[i] - nurse_shifts[j]) <= 1)
-                model.add((nurse_shifts[j] - nurse_shifts[i]) <= 1)
+        # No more than max_consecutive_days worked in a row
+        for e in all_employees:
+            for start_day in range(self.num_days - self.max_consecutive_days):
+                # Sum of shifts worked in max_consecutive_days + 1 consecutive days
+                consecutive_shifts = []
+                for d in range(start_day, start_day + self.max_consecutive_days + 1):
+                    if d < self.num_days:  # Ensure we don't go beyond the month
+                        for s in all_shifts:
+                            consecutive_shifts.append(shifts[(e, d, s)])
+                model.add(sum(consecutive_shifts) <= self.max_consecutive_days)
         
-        # Vincolo: massimo max_consecutive_days giorni consecutivi di lavoro
+        # No back-to-back shifts (P followed by M)
+        for e in all_employees:
+            for d in range(self.num_days - 1):
+                # If employee works afternoon shift (index 1) on day d, they can't work morning shift (index 0) on day d+1
+                model.add(shifts[(e, d, 1)] + shifts[(e, d+1, 0)] <= 1)
+        
+        # Get weekend pairs (Saturday, Sunday)
+        weekend_pairs = self.get_weekend_days()
+        print(f"Weekend pairs: {weekend_pairs}")  # Debug info
+        
+        # Enforce minimum free weekends for nurses
         for n in all_nurses:
-            for d in range(num_days - max_consecutive_days):
-                # Somma dei turni per (max_consecutive_days + 1) giorni consecutivi
-                consecutive_days = []
-                for i in range(max_consecutive_days + 1):
-                    for s in all_shifts:
-                        consecutive_days.append(shifts[(n, d + i, s)])
-                # Al massimo max_consecutive_days turni in (max_consecutive_days + 1) giorni consecutivi
-                model.add(sum(consecutive_days) <= max_consecutive_days)
-        
-        # Vincolo: non si può passare da turno pomeriggio a turno mattina il giorno dopo
-        for n in all_nurses:
-            for d in range(num_days - 1):
-                # Se lavora nel turno pomeriggio (1), non può lavorare nel turno mattina (0) il giorno dopo
-                model.add(shifts[(n, d, 1)] + shifts[(n, d + 1, 0)] <= 1)
-        
-        # Vincolo: almeno min_free_weekends weekend liberi nel periodo
-        weekend_days = []
-        for d in range(num_days):
-            current_date = date_start + timedelta(days=d)
-            day_of_week = current_date.weekday()
-            if day_of_week == 5 or day_of_week == 6:  # Sabato o Domenica
-                weekend_days.append(d)
-        
-        # Raggruppa i weekend
-        weekends = []
-        current_weekend = []
-        for d in weekend_days:
-            if not current_weekend or d == current_weekend[-1] + 1:
-                current_weekend.append(d)
-            else:
-                weekends.append(current_weekend)
-                current_weekend = [d]
-        if current_weekend:
-            weekends.append(current_weekend)
-        
-        # Per ogni infermiera, crea variabili per i weekend liberi
-        free_weekends = {}
-        for n in all_nurses:
-            for i, weekend in enumerate(weekends):
-                # Un weekend è libero se l'infermiera non lavora in nessun giorno del weekend
-                weekend_shifts = []
-                for d in weekend:
-                    for s in all_shifts:
-                        weekend_shifts.append(shifts[(n, d, s)])
+            weekend_is_free = []
+            for sat_idx, sun_idx in weekend_pairs:
+                # Create a variable for whether this weekend is free for this nurse
+                is_free = model.new_bool_var(f"weekend_free_n{n}_w{sat_idx//7}")
                 
-                # Il weekend è libero se non ci sono turni
-                free_weekends[(n, i)] = model.new_bool_var(f"free_weekend_n{n}_w{i}")
+                # A weekend is free if both Saturday and Sunday are free
+                sat_shifts = sum(shifts[(n, sat_idx, s)] for s in all_shifts)
+                sun_shifts = sum(shifts[(n, sun_idx, s)] for s in all_shifts)
                 
-                # Correct implementation using the proper pattern:
-                model.add(sum(weekend_shifts) == 0).only_enforce_if(free_weekends[(n, i)])
-                model.add(sum(weekend_shifts) >= 1).only_enforce_if(~free_weekends[(n, i)])
+                # Use linear constraints instead of boolean operations
+                # is_free = 1 if and only if sat_shifts = 0 and sun_shifts = 0
+                model.add(sat_shifts + sun_shifts <= 2 * (1 - is_free))
+                model.add(sat_shifts + sun_shifts >= 1 - is_free)
+                
+                weekend_is_free.append(is_free)
             
-            # Ogni infermiera deve avere almeno min_free_weekends weekend liberi
-            # Verificare che ci siano abbastanza weekend nel periodo
-            num_required = min(min_free_weekends, len(weekends))
-            if num_required > 0:
-                model.add(sum(free_weekends[(n, i)] for i in range(len(weekends))) >= num_required)
+            # Ensure at least min_free_weekends are free
+            if weekend_is_free:
+                model.add(sum(weekend_is_free) >= self.min_free_weekends)
         
-        # Variabili per le preferenze soddisfatte
-        preference_variables = {}
-        total_preferences = 0
-        
-        # Imposta l'obiettivo del modello
-        objective_description = ""
+        # Objective function
         objective_terms = []
         
-        # Aggiungi i termini per le deviazioni dalle ore target
-        for dev in hours_deviation:
-            objective_terms.append(dev)
+        # 1. Maximize nurse preferences (weight: 10)
+        for n in all_nurses:
+            for d in all_days:
+                for s in all_shifts:
+                    day_key = (d + 1, self.shifts[s])  # Convert to 1-indexed days
+                    if day_key in self.nurse_preferences[n]:
+                        objective_terms.append(shifts[(n, d, s)] * self.nurse_preferences[n][day_key] * 10)
         
-        # Se ci sono preferenze delle infermiere, aggiungi l'obiettivo di massimizzarle
-        if nurse_preferences and len(nurse_preferences) > 0:
-            preference_met = []
-            total_preferences = len(nurse_preferences)
-            
-            for n in all_nurses:
-                for d in all_days:
-                    for s in all_shifts:
-                        if (n, d, s) in nurse_preferences and nurse_preferences[(n, d, s)] == 1:
-                            # Crea una variabile per ogni preferenza
-                            pref_var = model.new_bool_var(f"pref_n{n}_d{d}_s{s}")
-                            preference_variables[(n, d, s)] = pref_var
-                            
-                            # La variabile è vera se la preferenza è soddisfatta
-                            model.add(pref_var == shifts[(n, d, s)])
-                            
-                            # Aggiungi la variabile all'obiettivo (con peso più alto per dare priorità)
-                            preference_met.append(10 * pref_var)  # Peso 10 volte maggiore delle deviazioni orarie
-                            objective_terms.append(10 * pref_var)
-            
-            objective_description = "Massimizzazione delle preferenze e minimizzazione delle deviazioni orarie"
+        # 2. Maximize freelancer availability (weight: 5)
+        for f_idx, f in enumerate(range(self.num_nurses, self.num_nurses + self.num_freelancers)):
+            for d in all_days:
+                for s in all_shifts:
+                    day_key = (d + 1, self.shifts[s])  # Convert to 1-indexed days
+                    if day_key in self.freelancer_availability[f_idx] and self.freelancer_availability[f_idx][day_key] == 1:
+                        objective_terms.append(shifts[(f, d, s)] * 5)
+        
+        # 3. Maximize free weekends beyond minimum (weight: 50)
+        for n in all_nurses:
+            for is_free in weekend_is_free:
+                objective_terms.append(is_free * 50)
+        
+        # Add the objective function
+        if objective_terms:
             model.maximize(sum(objective_terms))
-        else:
-            # Obiettivo predefinito: minimizzare le deviazioni dalle ore target
-            objective_description = "Minimizzazione delle deviazioni dalle ore contrattuali"
-            model.minimize(sum(objective_terms))
         
-        # Risolutore
+        # Create a solver and solve the model
         solver = cp_model.CpSolver()
+        
+        # Set a time limit to avoid getting stuck (300 seconds = 5 minutes)
+        solver.parameters.max_time_in_seconds = 300.0
+        
+        # Set additional parameters for better solution quality
+        solver.parameters.linearization_level = 0
+        
         status = solver.solve(model)
         
-        # Prepara il risultato
         if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-            schedule = {}
+            # Create a DataFrame with the schedule
+            dates = [datetime(self.year, self.month, day+1) for day in all_days]
+            
+            # Create a dictionary to store hours worked per nurse for summary
+            hours_worked = {n: 0 for n in all_nurses}
+            
+            # Create new schedule format with dates as rows and employees as columns
+            # Initialize data with dates
+            schedule_data = []
             for d in all_days:
                 date = dates[d]
-                schedule[date] = {}
-                for n in all_nurses:
-                    schedule[date][f"Infermiere {n+1}"] = "Riposo"
-                    for s in all_shifts:
-                        if solver.value(shifts[(n, d, s)]) == 1:
-                            shift_name = "Mattino" if s == 0 else "Pomeriggio"
-                            schedule[date][f"Infermiere {n+1}"] = shift_name
-            
-            # Calcola le ore lavorate per ogni infermiera
-            hours_worked = {f"Infermiere {n+1}": 0 for n in all_nurses}
-            shifts_worked = {f"Infermiere {n+1}": 0 for n in all_nurses}
-            
-            for d in all_days:
-                for n in all_nurses:
-                    for s in all_shifts:
-                        if solver.value(shifts[(n, d, s)]) == 1:
-                            hours_worked[f"Infermiere {n+1}"] += self.shift_duration
-                            shifts_worked[f"Infermiere {n+1}"] += 1
-            
-            # Calcola le preferenze soddisfatte
-            preferences_met = 0
-            preferences_details = {}
-            
-            if nurse_preferences and total_preferences > 0:
-                for (n, d, s), pref_var in preference_variables.items():
-                    if solver.value(pref_var) == 1:
-                        preferences_met += 1
-                        nurse_name = f"Infermiere {n+1}"
-                        shift_name = "Mattino" if s == 0 else "Pomeriggio"
-                        date_str = dates[d]
-                        
-                        if nurse_name not in preferences_details:
-                            preferences_details[nurse_name] = []
-                            
-                        preferences_details[nurse_name].append({
-                            "data": date_str,
-                            "turno": shift_name
-                        })
+                row_data = {
+                    'Data': date.strftime('%d/%m/%Y'),
+                    'Giorno': date.strftime('%A'),
+                }
                 
-                preferences_percentage = (preferences_met / total_preferences) * 100
-            else:
-                preferences_percentage = 0
+                # Add employees as columns
+                for n in all_nurses:
+                    employee_name = f"Infermiere {n+1}"
+                    if solver.value(shifts[(n, d, 0)]) == 1:  # Morning shift
+                        row_data[employee_name] = "Mattino"
+                        hours_worked[n] += self.shift_duration
+                    elif solver.value(shifts[(n, d, 1)]) == 1:  # Afternoon shift
+                        row_data[employee_name] = "Pomeriggio"
+                        hours_worked[n] += self.shift_duration
+                    else:
+                        row_data[employee_name] = "Riposo"
+                
+                # Add freelancers as columns
+                for f_idx, f in enumerate(range(self.num_nurses, self.num_nurses + self.num_freelancers)):
+                    employee_name = f"Freelancer {f_idx+1}"
+                    if solver.value(shifts[(f, d, 0)]) == 1:  # Morning shift
+                        row_data[employee_name] = "Mattino"
+                    elif solver.value(shifts[(f, d, 1)]) == 1:  # Afternoon shift
+                        row_data[employee_name] = "Pomeriggio"
+                    else:
+                        row_data[employee_name] = "Riposo"
+                
+                schedule_data.append(row_data)
             
-            # Calcola la differenza massima nei turni lavorati
-            min_worked = min(shifts_worked.values())
-            max_worked = max(shifts_worked.values())
-            shift_difference = max_worked - min_worked
+            # Create a DataFrame
+            schedule_df = pd.DataFrame(schedule_data)
             
-            # Calcola le deviazioni dalle ore contrattuali
-            hour_deviations = {}
+            # Calculate free weekends for each nurse
+            free_weekends = {n: 0 for n in all_nurses}
             for n in all_nurses:
-                nurse_name = f"Infermiere {n+1}"
-                worked = hours_worked[nurse_name]
-                deviation = worked - target_hours
-                hour_deviations[nurse_name] = deviation
+                for sat_idx, sun_idx in weekend_pairs:
+                    sat_free = True
+                    sun_free = True
+                    
+                    for s in all_shifts:
+                        if solver.value(shifts[(n, sat_idx, s)]) == 1:
+                            sat_free = False
+                        if solver.value(shifts[(n, sun_idx, s)]) == 1:
+                            sun_free = False
+                    
+                    if sat_free and sun_free:
+                        free_weekends[n] += 1
             
-            return {
-                "status": "ottimale" if status == cp_model.OPTIMAL else "fattibile",
-                "schedule": schedule,
-                "hours_worked": hours_worked,
-                "shifts_worked": shifts_worked,
-                "parameters": {
-                    "date_start": date_start.strftime("%Y-%m-%d"),
-                    "date_end": date_end.strftime("%Y-%m-%d"),
-                    "min_free_weekends": min_free_weekends,
-                    "max_consecutive_days": max_consecutive_days,
-                    "target_hours": target_hours,
-                    "min_hours": min_hours,
-                    "max_hours": max_hours
-                },
-                "objective": {
-                    "description": objective_description,
-                    "shift_difference": shift_difference
-                },
-                "hour_deviations": hour_deviations,
-                "preferences": {
-                    "total": total_preferences,
-                    "met": preferences_met,
-                    "percentage": preferences_percentage,
-                    "details": preferences_details
-                },
-                "statistics": {
-                    "conflicts": solver.num_conflicts,
-                    "branches": solver.num_branches,
-                    "wall_time": solver.wall_time
-                }
-            }
+            # Print hours worked summary
+            print("Ore lavorate per infermiere:")
+            for n in all_nurses:
+                print(f"Infermiere {n+1}: {hours_worked[n]} ore (obiettivo: {self.nurse_hours[n]} ± {self.hours_flexibility})")
+            
+            # Print free weekends summary
+            print("Weekend liberi per infermiere:")
+            for n in all_nurses:
+                print(f"Infermiere {n+1}: {free_weekends[n]} weekend liberi (minimo richiesto: {self.min_free_weekends})")
+            
+            return True, schedule_df, hours_worked, free_weekends
         else:
-            return {
-                "status": "non fattibile",
-                "schedule": None,
-                "parameters": {
-                    "date_start": date_start.strftime("%Y-%m-%d"),
-                    "date_end": date_end.strftime("%Y-%m-%d"),
-                    "min_free_weekends": min_free_weekends,
-                    "max_consecutive_days": max_consecutive_days,
-                    "target_hours": target_hours,
-                    "min_hours": min_hours,
-                    "max_hours": max_hours
-                },
-                "objective": {
-                    "description": objective_description
-                },
-                "preferences": {
-                    "total": total_preferences,
-                    "met": 0,
-                    "percentage": 0,
-                    "details": {}
-                },
-                "statistics": {
-                    "conflicts": solver.num_conflicts,
-                    "branches": solver.num_branches,
-                    "wall_time": solver.wall_time
-                }
-            }
+            print(f"Solve status: {status}")
+            if status == cp_model.INFEASIBLE:
+                print("Il problema non ammette soluzioni con i vincoli specificati.")
+            elif status == cp_model.MODEL_INVALID:
+                print("Il modello è invalido.")
+            elif status == cp_model.UNKNOWN:
+                print("Il solutore non è riuscito a trovare una soluzione entro il tempo limite.")
+            return False, None, None, None
     
-    def get_schedule_dataframe(self, schedule):
-        """Converte il dizionario di pianificazione in un DataFrame pandas"""
-        if not schedule:
-            return None
+    def export_to_excel(self, schedule_df, filename="schedule.xlsx", hours_worked=None, nurse_hours=None, hours_flexibility=None, free_weekends=None, min_free_weekends=None):
+        """Export the schedule to an Excel file"""
+        writer = pd.ExcelWriter(filename, engine='xlsxwriter')
+        schedule_df.to_excel(writer, sheet_name='Pianificazione', index=False)
         
-        dates = sorted(schedule.keys())
-        df_data = []
+        # Add summary sheet if we have hours and weekends data
+        if hours_worked and nurse_hours and free_weekends:
+            # Create a DataFrame for summary
+            summary_data = []
+            for nurse_id in range(len(nurse_hours)):
+                target_hours = nurse_hours[nurse_id]
+                actual_hours = hours_worked[nurse_id] if nurse_id in hours_worked else 0
+                target_weekends = min_free_weekends or 1
+                actual_weekends = free_weekends[nurse_id] if nurse_id in free_weekends else 0
+                hours_diff = actual_hours - target_hours
+                flex = hours_flexibility if hours_flexibility is not None else 0
+                
+                summary_data.append({
+                    'Infermiere': f"Infermiere {nurse_id + 1}",
+                    'Ore Contrattuali': target_hours,
+                    'Ore Pianificate': actual_hours,
+                    'Differenza Ore': hours_diff,
+                    'Entro Flessibilità': "Sì" if abs(hours_diff) <= flex else "No",
+                    'Weekend Liberi': actual_weekends,
+                    'Weekends Minimi': target_weekends,
+                    'Weekends OK': "Sì" if actual_weekends >= target_weekends else "No"
+                })
+            
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_excel(writer, sheet_name='Riepilogo', index=False)
         
-        for date in dates:
-            row_data = {"Data": date}
-            for nurse, shift in schedule[date].items():
-                row_data[nurse] = shift
-            df_data.append(row_data)
+        # Add hours worked sheet (legacy)
+        if hours_worked and nurse_hours:
+            # Create a DataFrame for hours worked
+            hours_data = []
+            for nurse_id, hours in hours_worked.items():
+                target_hours = nurse_hours[nurse_id]
+                flex = hours_flexibility if hours_flexibility is not None else 0
+                diff = hours - target_hours
+                
+                hours_data.append({
+                    'Infermiere': f"Infermiere {nurse_id + 1}",
+                    'Ore Contrattuali': target_hours,
+                    'Ore Lavorate': hours,
+                    'Differenza': diff,
+                    'Entro Flessibilità': "Sì" if abs(diff) <= flex else "No"
+                })
+            
+            hours_df = pd.DataFrame(hours_data)
+            hours_df.to_excel(writer, sheet_name='Ore Lavorate', index=False)
         
-        df = pd.DataFrame(df_data)
-        return df
+        # Format the Excel file
+        workbook = writer.book
+        worksheet = writer.sheets['Pianificazione']
+        
+        # Define formats
+        header_format = workbook.add_format({
+            'bold': True,
+            'text_wrap': True,
+            'valign': 'top',
+            'fg_color': '#D7E4BC',
+            'border': 1})
+        
+        weekend_format = workbook.add_format({
+            'fg_color': '#FFCCCC',
+            'border': 1})
+        
+        morning_format = workbook.add_format({
+            'fg_color': '#FFEB99',
+            'border': 1,
+            'align': 'center'})
+        
+        afternoon_format = workbook.add_format({
+            'fg_color': '#99CCFF',
+            'border': 1,
+            'align': 'center'})
+        
+        rest_format = workbook.add_format({
+            'fg_color': '#D9D9D9',
+            'font_color': '#777777',
+            'border': 1,
+            'align': 'center'})
+        
+        # Set column widths
+        worksheet.set_column('A:A', 12)  # Date
+        worksheet.set_column('B:B', 10)  # Day of week
+        
+        # Set width for all employee columns
+        for col_idx in range(2, len(schedule_df.columns)):
+            worksheet.set_column(col_idx, col_idx, 12)
+        
+        # Set the header format
+        for col_num, value in enumerate(schedule_df.columns.values):
+            worksheet.write(0, col_num, value, header_format)
+        
+        # Apply conditional formatting to shift cells and highlight weekends
+        for row_num, row in enumerate(schedule_df.iterrows(), start=1):
+            # Highlight weekend rows
+            if row[1]['Giorno'] in ['Saturday', 'Sunday', 'Sabato', 'Domenica']:
+                worksheet.set_row(row_num, None, weekend_format)
+            
+            # Apply shift formatting to each employee cell
+            for col_num, (col_name, cell_value) in enumerate(row[1].items()):
+                if col_name not in ['Data', 'Giorno']:
+                    # Get the cell position
+                    cell_pos = f"{chr(65 + col_num)}{row_num + 1}"  # A1, B1, etc.
+                    
+                    # Apply the appropriate format based on shift type
+                    if cell_value == "Mattino":
+                        worksheet.write(row_num, col_num, cell_value, morning_format)
+                    elif cell_value == "Pomeriggio":
+                        worksheet.write(row_num, col_num, cell_value, afternoon_format)
+                    elif cell_value == "Riposo":
+                        worksheet.write(row_num, col_num, cell_value, rest_format)
+        
+        # Format the summary sheet if available
+        if hours_worked and nurse_hours and free_weekends:
+            summary_worksheet = writer.sheets['Riepilogo']
+            
+            # Set column widths
+            summary_worksheet.set_column('A:A', 15)  # Infermiere
+            summary_worksheet.set_column('B:B', 15)  # Ore Contrattuali
+            summary_worksheet.set_column('C:C', 15)  # Ore Pianificate
+            summary_worksheet.set_column('D:D', 15)  # Differenza Ore
+            summary_worksheet.set_column('E:E', 15)  # Entro Flessibilità
+            summary_worksheet.set_column('F:F', 15)  # Weekend Liberi
+            summary_worksheet.set_column('G:G', 15)  # Weekends Minimi
+            summary_worksheet.set_column('H:H', 15)  # Weekends OK
+            
+            # Set the header format
+            for col_num, value in enumerate(summary_df.columns.values):
+                summary_worksheet.write(0, col_num, value, header_format)
+            
+            # Define formats for conditional formatting
+            good_format = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100'})
+            bad_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
+            
+            # Apply conditional formatting to the "Entro Flessibilità" column
+            summary_worksheet.conditional_format('E2:E100', {'type': 'cell',
+                                                          'criteria': '==',
+                                                          'value': '"Sì"',
+                                                          'format': good_format})
+            
+            summary_worksheet.conditional_format('E2:E100', {'type': 'cell',
+                                                          'criteria': '==',
+                                                          'value': '"No"',
+                                                          'format': bad_format})
+            
+            # Apply conditional formatting to the "Weekends OK" column
+            summary_worksheet.conditional_format('H2:H100', {'type': 'cell',
+                                                          'criteria': '==',
+                                                          'value': '"Sì"',
+                                                          'format': good_format})
+            
+            summary_worksheet.conditional_format('H2:H100', {'type': 'cell',
+                                                          'criteria': '==',
+                                                          'value': '"No"',
+                                                          'format': bad_format})
+        
+        # Format the hours worked sheet if available
+        if hours_worked and nurse_hours:
+            hours_worksheet = writer.sheets['Ore Lavorate']
+            
+            # Set column widths
+            hours_worksheet.set_column('A:A', 15)
+            hours_worksheet.set_column('B:B', 15)
+            hours_worksheet.set_column('C:C', 15)
+            hours_worksheet.set_column('D:D', 15)
+            hours_worksheet.set_column('E:E', 15)
+            
+            # Set the header format
+            for col_num, value in enumerate(hours_df.columns.values):
+                hours_worksheet.write(0, col_num, value, header_format)
+            
+            # Define conditional formatting
+            good_format = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100'})
+            bad_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
+            
+            # Apply conditional formatting to the "Entro Flessibilità" column
+            hours_worksheet.conditional_format('E2:E100', {'type': 'cell',
+                                                         'criteria': '==',
+                                                         'value': '"Sì"',
+                                                         'format': good_format})
+            
+            hours_worksheet.conditional_format('E2:E100', {'type': 'cell',
+                                                         'criteria': '==',
+                                                         'value': '"No"',
+                                                         'format': bad_format})
+        
+        writer.close()
+        return filename
