@@ -17,16 +17,18 @@ class SchedulingView:
         """Setup the main UI components"""
         st.title("🏥 Pianificazione Turni Infermieri")
         
-        # Create tabs for different sections
-        tab1, tab2, tab3 = st.tabs(["Configurazione", "Preferenze e Disponibilità", "Risultati"])
+        # Add configuration to sidebar
+        with st.sidebar:
+            st.header("Configurazione")
+            self.show_configuration_sidebar()
+        
+        # Create tabs for different sections (now only two)
+        tab1, tab2 = st.tabs(["Preferenze e Disponibilità", "Risultati"])
         
         with tab1:
-            self.show_configuration_tab()
-            
-        with tab2:
             self.show_preferences_tab()
             
-        with tab3:
+        with tab2:
             self.show_results_tab()
             
         # Display any messages
@@ -34,100 +36,96 @@ class SchedulingView:
             self.display_messages(self.messages)
             self.messages = []
     
-    def show_configuration_tab(self):
-        """Show the configuration tab UI"""
-        st.header("Configurazione")
+    def show_configuration_sidebar(self):
+        """Show the configuration UI in the sidebar"""
+        # Month and year selection
+        current_month = datetime.now().month
+        current_year = datetime.now().year
         
-        col1, col2 = st.columns(2)
+        month = st.selectbox(
+            "Mese di Pianificazione",
+            options=range(1, 13),
+            format_func=lambda m: calendar.month_name[m],
+            index=current_month - 1,
+            key="month_selector"
+        )
         
-        with col1:
-            # Month and year selection
-            current_month = datetime.now().month
-            current_year = datetime.now().year
-            
-            month = st.selectbox(
-                "Mese di Pianificazione",
-                options=range(1, 13),
-                format_func=lambda m: calendar.month_name[m],
-                index=current_month - 1,
-                key="month_selector"
-            )
-            
-            year = st.number_input(
-                "Anno di Pianificazione",
-                min_value=current_year,
-                max_value=current_year + 5,
-                value=current_year,
-                key="year_input"
-            )
-            
-            # Calculate days in the month
-            days_in_month = calendar.monthrange(year, month)[1]
-            st.info(f"Giorni nel mese selezionato: {days_in_month}")
-            
-            # Number of nurses and freelancers
-            num_nurses = st.number_input(
-                "Numero di Infermieri",
-                min_value=1,
-                max_value=10,
-                value=3,
-                key="num_nurses_input"
-            )
-            
-            num_freelancers = st.number_input(
-                "Numero di Freelancer",
-                min_value=0,
-                max_value=10,
-                value=2,
-                key="num_freelancers_input"
-            )
+        year = st.number_input(
+            "Anno di Pianificazione",
+            min_value=current_year,
+            max_value=current_year + 5,
+            value=current_year,
+            key="year_input"
+        )
         
-        with col2:
-            # Constraint parameters
-            min_free_weekends = st.number_input(
-                "Numero Minimo di Weekend Liberi per Infermiere",
-                min_value=0,
-                max_value=5,
-                value=1,
-                key="min_free_weekends_input"
+        # Calculate days in the month
+        days_in_month = calendar.monthrange(year, month)[1]
+        st.info(f"Giorni nel mese selezionato: {days_in_month}")
+        
+        # Number of nurses and freelancers
+        num_nurses = st.number_input(
+            "Numero di Infermieri",
+            min_value=1,
+            max_value=10,
+            value=3,
+            key="num_nurses_input"
+        )
+        
+        num_freelancers = st.number_input(
+            "Numero di Freelancer",
+            min_value=0,
+            max_value=10,
+            value=2,
+            key="num_freelancers_input"
+        )
+        
+        # Constraint parameters
+        st.subheader("Vincoli")
+        
+        min_free_weekends = st.number_input(
+            "Numero Minimo di Weekend Liberi per Infermiere",
+            min_value=0,
+            max_value=5,
+            value=1,
+            key="min_free_weekends_input"
+        )
+        
+        max_consecutive_days = st.slider(
+            "Massimo Giorni Consecutivi di Lavoro",
+            min_value=1,
+            max_value=6,
+            value=5,
+            key="max_consecutive_days_slider"
+        )
+        
+        hours_flexibility = st.slider(
+            "Flessibilità Oraria (ore)",
+            min_value=0,
+            max_value=16,
+            value=8,
+            help="Numero massimo di ore in più o in meno rispetto al monte ore contrattuale",
+            key="hours_flexibility_slider"
+        )
+        
+        st.subheader("Ore Contrattuali")
+        
+        # Store nurse hours in session state
+        if 'nurse_hours' not in st.session_state:
+            st.session_state.nurse_hours = {i: 165 for i in range(num_nurses)}
+        
+        # Update session state if number of nurses changes
+        if len(st.session_state.nurse_hours) != num_nurses:
+            st.session_state.nurse_hours = {i: 165 for i in range(num_nurses)}
+        
+        # Display input fields for each nurse's hours
+        for i in range(num_nurses):
+            st.session_state.nurse_hours[i] = st.number_input(
+                f"Ore Mensili Infermiere {i+1}",
+                min_value=80,
+                max_value=200,
+                value=st.session_state.nurse_hours.get(i, 165),
+                key=f"nurse_hours_{i}"
             )
-            
-            max_consecutive_days = st.slider(
-                "Massimo Giorni Consecutivi di Lavoro",
-                min_value=1,
-                max_value=6,
-                value=5,
-                key="max_consecutive_days_slider"
-            )
-            
-            hours_flexibility = st.slider(
-                "Flessibilità Oraria (ore)",
-                min_value=0,
-                max_value=16,
-                value=8,
-                help="Numero massimo di ore in più o in meno rispetto al monte ore contrattuale",
-                key="hours_flexibility_slider"
-            )
-            
-            st.markdown("### Ore Contrattuali Mensili per Infermiere")
-            
-            # Store nurse hours in session state
-            if 'nurse_hours' not in st.session_state:
-                st.session_state.nurse_hours = {i: 165 for i in range(num_nurses)}
-            
-            # Update session state if number of nurses changes
-            if len(st.session_state.nurse_hours) != num_nurses:
-                st.session_state.nurse_hours = {i: 165 for i in range(num_nurses)}
-            
-            # Display input fields for each nurse's hours
-            for i in range(num_nurses):
-                st.session_state.nurse_hours[i] = st.number_input(
-                    f"Ore Mensili Infermiere {i+1}",
-                    min_value=80,
-                    max_value=200,
-                    value=st.session_state.nurse_hours.get(i, 165),
-                    key=f"nurse_hours_{i}"
-                )
         
         # Store configuration in session state
         st.session_state.config = {
