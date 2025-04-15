@@ -145,29 +145,54 @@ class SchedulingModel:
             if weekend_is_free:
                 model.add(sum(weekend_is_free) >= self.min_free_weekends)
         
-        # Objective function
+        # Objective function with normalized components and weights (40%, 20%, 40%)
         objective_terms = []
         
-        # 1. Maximize nurse preferences (weight: 10)
+        # Calculate maximum possible values for normalization
+        max_nurse_pref = 0
+        for n in all_nurses:
+            max_nurse_pref += len(self.nurse_preferences.get(n, {}))
+        
+        max_freelancer_avail = 0
+        for f_idx in range(self.num_freelancers):
+            max_freelancer_avail += len(self.freelancer_availability.get(f_idx, {}))
+        
+        max_free_weekends = len(weekend_pairs) * self.num_nurses
+        
+        # Avoid division by zero
+        max_nurse_pref = max(max_nurse_pref, 1)
+        max_freelancer_avail = max(max_freelancer_avail, 1)
+        max_free_weekends = max(max_free_weekends, 1)
+        
+        # Calculate scaling factors (instead of division)
+        # Scale to keep the proportion 40/20/40
+        nurse_pref_scale = 400.0 / max_nurse_pref  # 40% weight
+        freelancer_avail_scale = 200.0 / max_freelancer_avail  # 20% weight
+        free_weekends_scale = 400.0 / max_free_weekends  # 40% weight
+        
+        # 1. Nurse preferences (40% weight)
         for n in all_nurses:
             for d in all_days:
                 for s in all_shifts:
                     day_key = (d + 1, self.shifts[s])  # Convert to 1-indexed days
                     if day_key in self.nurse_preferences[n]:
-                        objective_terms.append(shifts[(n, d, s)] * self.nurse_preferences[n][day_key] * 10)
+                        # Use multiplication with scaling factor instead of division
+                        objective_terms.append(shifts[(n, d, s)] * self.nurse_preferences[n][day_key] * nurse_pref_scale)
         
-        # 2. Maximize freelancer availability (weight: 5)
+        # 2. Freelancer availability (20% weight)
         for f_idx, f in enumerate(range(self.num_nurses, self.num_nurses + self.num_freelancers)):
             for d in all_days:
                 for s in all_shifts:
                     day_key = (d + 1, self.shifts[s])  # Convert to 1-indexed days
                     if day_key in self.freelancer_availability[f_idx] and self.freelancer_availability[f_idx][day_key] == 1:
-                        objective_terms.append(shifts[(f, d, s)] * 5)
+                        # Use multiplication with scaling factor
+                        objective_terms.append(shifts[(f, d, s)] * freelancer_avail_scale)
         
-        # 3. Maximize free weekends beyond minimum (weight: 50)
+        # 3. Free weekends beyond minimum (40% weight)
         for n in all_nurses:
             for is_free in weekend_is_free:
-                objective_terms.append(is_free * 50)
+                # Use multiplication with scaling factor
+                objective_terms.append(is_free * free_weekends_scale)
         
         # Add the objective function
         if objective_terms:
