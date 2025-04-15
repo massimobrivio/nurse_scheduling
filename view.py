@@ -622,25 +622,11 @@ class SchedulingView:
                 )
             
             # Export options
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if st.button("Esporta in Excel", key="excel_button"):
-                    st.session_state.export_excel_requested = True
+            col1, col2, col3 = st.columns([1, 2, 1])
             
             with col2:
-                if st.button("Esporta in CSV", key="csv_button"):
-                    # Create a CSV file
-                    csv = schedule_df.to_csv(index=False)
-                    
-                    # Create a download button
-                    st.download_button(
-                        label="Download CSV",
-                        data=csv,
-                        file_name=f"turni_{st.session_state.config['month']}_{st.session_state.config['year']}.csv",
-                        mime="text/csv",
-                        key="csv_download"
-                    )
+                if st.button("Esporta in Excel", key="excel_button", use_container_width=True):
+                    st.session_state.export_excel_requested = True
         
         elif 'schedule_result' in st.session_state and not st.session_state.schedule_result[0]:
             st.error("Impossibile trovare una soluzione valida con i vincoli specificati. Prova a modificare i parametri.")
