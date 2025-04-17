@@ -4,6 +4,7 @@ import calendar
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Tuple, Optional
+import io
 
 class SchedulingModel:
     def __init__(self):
@@ -20,12 +21,13 @@ class SchedulingModel:
         self.nurse_preferences = {}  # Dictionary mapping nurse ID to their preferences
         self.freelancer_availability = {}  # Dictionary mapping freelancer ID to their availability
         self.hours_flexibility = 8  # Allow 8 hours of flexibility (one shift) above or below contracted hours
+        self.work_rest_ratio = 3.0  # Default work-to-rest ratio
 
     def setup_model(self, year: int, month: int, num_nurses: int, num_freelancers: int, 
                    nurse_hours: Dict[int, int], min_free_weekends: int, max_consecutive_days: int,
                    nurse_preferences: Dict[int, Dict[Tuple[int, str], int]], 
                    freelancer_availability: Dict[int, Dict[Tuple[int, str], int]],
-                   hours_flexibility: int = 8):
+                   hours_flexibility: int = 8, work_rest_ratio: float = 3.0):
         """Setup the model with the provided parameters"""
         self.year = year
         self.month = month
@@ -37,6 +39,7 @@ class SchedulingModel:
         self.nurse_preferences = nurse_preferences
         self.freelancer_availability = freelancer_availability
         self.hours_flexibility = hours_flexibility
+        self.work_rest_ratio = work_rest_ratio
         
         # Calculate the number of days in the month
         self.num_days = calendar.monthrange(year, month)[1]
@@ -112,6 +115,28 @@ class SchedulingModel:
                         for s in all_shifts:
                             consecutive_shifts.append(shifts[(e, d, s)])
                 model.add(sum(consecutive_shifts) <= self.max_consecutive_days)
+        
+        # Sliding window constraint: in any 14-day period, maintain the specified work-to-rest ratio
+        window_size = 14
+        # Calculate max work days based on the ratio: work / (work + rest) = ratio
+        # In a 14-day window with work + rest = 14:
+        # work / 14 = ratio
+        # So work = 14 * ratio / (1 + ratio)
+        # For a 3:1 ratio, this gives 10.5 days, which we round down to 10
+        max_work_days_in_window = min(int(window_size * self.work_rest_ratio / (1 + self.work_rest_ratio)), window_size - 1)
+        
+        for e in all_employees:
+            # For each possible starting day of a 14-day window
+            for start_day in range(self.num_days - window_size + 1):
+                # Sum of shifts worked in this 14-day window
+                window_shifts = []
+                for d in range(start_day, start_day + window_size):
+                    if d < self.num_days:  # Ensure we don't go beyond the month
+                        for s in all_shifts:
+                            window_shifts.append(shifts[(e, d, s)])
+                
+                # Ensure the number of work days in this window is at most max_work_days_in_window
+                model.add(sum(window_shifts) <= max_work_days_in_window)
         
         # No back-to-back shifts (P followed by M)
         for e in all_employees:
@@ -481,3 +506,199 @@ class SchedulingModel:
         
         writer.close()
         return filename
+
+    def export_to_excel_bytes(self, schedule_df, filename="schedule.xlsx", hours_worked=None, nurse_hours=None, hours_flexibility=None, free_weekends=None, min_free_weekends=None):
+        """Export the schedule to an Excel file and return the bytes"""
+        output = io.BytesIO()
+        writer = pd.ExcelWriter(output, engine='xlsxwriter')
+        schedule_df.to_excel(writer, sheet_name='Pianificazione', index=False)
+        
+        # Add summary sheet if we have hours and weekends data
+        if hours_worked and nurse_hours and free_weekends:
+            # Create a DataFrame for summary
+            summary_data = []
+            for nurse_id in range(len(nurse_hours)):
+                target_hours = nurse_hours[nurse_id]
+                actual_hours = hours_worked[nurse_id] if nurse_id in hours_worked else 0
+                target_weekends = min_free_weekends or 1
+                actual_weekends = free_weekends[nurse_id] if nurse_id in free_weekends else 0
+                hours_diff = actual_hours - target_hours
+                flex = hours_flexibility if hours_flexibility is not None else 0
+                
+                summary_data.append({
+                    'Infermiere': f"Infermiere {nurse_id + 1}",
+                    'Ore Contrattuali': target_hours,
+                    'Ore Pianificate': actual_hours,
+                    'Differenza Ore': hours_diff,
+                    'Entro Flessibilità': "Sì" if abs(hours_diff) <= flex else "No",
+                    'Weekend Liberi': actual_weekends,
+                    'Weekends Minimi': target_weekends,
+                    'Weekends OK': "Sì" if actual_weekends >= target_weekends else "No"
+                })
+            
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_excel(writer, sheet_name='Riepilogo', index=False)
+        
+        # Add hours worked sheet (legacy)
+        if hours_worked and nurse_hours:
+            # Create a DataFrame for hours worked
+            hours_data = []
+            for nurse_id, hours in hours_worked.items():
+                target_hours = nurse_hours[nurse_id]
+                flex = hours_flexibility if hours_flexibility is not None else 0
+                diff = hours - target_hours
+                
+                hours_data.append({
+                    'Infermiere': f"Infermiere {nurse_id + 1}",
+                    'Ore Contrattuali': target_hours,
+                    'Ore Lavorate': hours,
+                    'Differenza': diff,
+                    'Entro Flessibilità': "Sì" if abs(diff) <= flex else "No"
+                })
+            
+            hours_df = pd.DataFrame(hours_data)
+            hours_df.to_excel(writer, sheet_name='Ore Lavorate', index=False)
+        
+        # Format the Excel file
+        workbook = writer.book
+        worksheet = writer.sheets['Pianificazione']
+        
+        # Define formats
+        header_format = workbook.add_format({
+            'bold': True,
+            'text_wrap': True,
+            'valign': 'top',
+            'fg_color': '#D7E4BC',
+            'border': 1})
+        
+        weekend_format = workbook.add_format({
+            'fg_color': '#FFCCCC',
+            'border': 1})
+        
+        morning_format = workbook.add_format({
+            'fg_color': '#FFEB99',
+            'border': 1,
+            'align': 'center'})
+        
+        afternoon_format = workbook.add_format({
+            'fg_color': '#99CCFF',
+            'border': 1,
+            'align': 'center'})
+        
+        rest_format = workbook.add_format({
+            'fg_color': '#D9D9D9',
+            'font_color': '#777777',
+            'border': 1,
+            'align': 'center'})
+        
+        # Set column widths
+        worksheet.set_column('A:A', 12)  # Date
+        worksheet.set_column('B:B', 10)  # Day of week
+        
+        # Set width for all employee columns
+        for col_idx in range(2, len(schedule_df.columns)):
+            worksheet.set_column(col_idx, col_idx, 12)
+        
+        # Set the header format
+        for col_num, value in enumerate(schedule_df.columns.values):
+            worksheet.write(0, col_num, value, header_format)
+        
+        # Apply conditional formatting to shift cells and highlight weekends
+        for row_num, row in enumerate(schedule_df.iterrows(), start=1):
+            # Highlight weekend rows
+            if row[1]['Giorno'] in ['Saturday', 'Sunday', 'Sabato', 'Domenica']:
+                worksheet.set_row(row_num, None, weekend_format)
+            
+            # Apply shift formatting to each employee cell
+            for col_num, (col_name, cell_value) in enumerate(row[1].items()):
+                if col_name not in ['Data', 'Giorno']:
+                    # Get the cell position
+                    cell_pos = f"{chr(65 + col_num)}{row_num + 1}"  # A1, B1, etc.
+                    
+                    # Apply the appropriate format based on shift type
+                    if cell_value == "Mattino":
+                        worksheet.write(row_num, col_num, cell_value, morning_format)
+                    elif cell_value == "Pomeriggio":
+                        worksheet.write(row_num, col_num, cell_value, afternoon_format)
+                    elif cell_value == "Riposo":
+                        worksheet.write(row_num, col_num, cell_value, rest_format)
+        
+        # Format the summary sheet if available
+        if hours_worked and nurse_hours and free_weekends:
+            summary_worksheet = writer.sheets['Riepilogo']
+            
+            # Set column widths
+            summary_worksheet.set_column('A:A', 15)  # Infermiere
+            summary_worksheet.set_column('B:B', 15)  # Ore Contrattuali
+            summary_worksheet.set_column('C:C', 15)  # Ore Pianificate
+            summary_worksheet.set_column('D:D', 15)  # Differenza Ore
+            summary_worksheet.set_column('E:E', 15)  # Entro Flessibilità
+            summary_worksheet.set_column('F:F', 15)  # Weekend Liberi
+            summary_worksheet.set_column('G:G', 15)  # Weekends Minimi
+            summary_worksheet.set_column('H:H', 15)  # Weekends OK
+            
+            # Set the header format
+            for col_num, value in enumerate(summary_df.columns.values):
+                summary_worksheet.write(0, col_num, value, header_format)
+            
+            # Define formats for conditional formatting
+            good_format = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100'})
+            bad_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
+            
+            # Apply conditional formatting to the "Entro Flessibilità" column
+            summary_worksheet.conditional_format('E2:E100', {'type': 'cell',
+                                                          'criteria': '==',
+                                                          'value': '"Sì"',
+                                                          'format': good_format})
+            
+            summary_worksheet.conditional_format('E2:E100', {'type': 'cell',
+                                                          'criteria': '==',
+                                                          'value': '"No"',
+                                                          'format': bad_format})
+            
+            # Apply conditional formatting to the "Weekends OK" column
+            summary_worksheet.conditional_format('H2:H100', {'type': 'cell',
+                                                          'criteria': '==',
+                                                          'value': '"Sì"',
+                                                          'format': good_format})
+            
+            summary_worksheet.conditional_format('H2:H100', {'type': 'cell',
+                                                          'criteria': '==',
+                                                          'value': '"No"',
+                                                          'format': bad_format})
+        
+        # Format the hours worked sheet if available
+        if hours_worked and nurse_hours:
+            hours_worksheet = writer.sheets['Ore Lavorate']
+            
+            # Set column widths
+            hours_worksheet.set_column('A:A', 15)
+            hours_worksheet.set_column('B:B', 15)
+            hours_worksheet.set_column('C:C', 15)
+            hours_worksheet.set_column('D:D', 15)
+            hours_worksheet.set_column('E:E', 15)
+            
+            # Set the header format
+            for col_num, value in enumerate(hours_df.columns.values):
+                hours_worksheet.write(0, col_num, value, header_format)
+            
+            # Define conditional formatting
+            good_format = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100'})
+            bad_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
+            
+            # Apply conditional formatting to the "Entro Flessibilità" column
+            hours_worksheet.conditional_format('E2:E100', {'type': 'cell',
+                                                         'criteria': '==',
+                                                         'value': '"Sì"',
+                                                         'format': good_format})
+            
+            hours_worksheet.conditional_format('E2:E100', {'type': 'cell',
+                                                         'criteria': '==',
+                                                         'value': '"No"',
+                                                         'format': bad_format})
+        
+        writer.close()
+        
+        # Get the bytes
+        output.seek(0)
+        return output.getvalue()

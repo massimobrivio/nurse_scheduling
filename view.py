@@ -106,13 +106,31 @@ class SchedulingView:
         )
         
         hours_flexibility = st.slider(
-            "Flessibilità Oraria (ore)",
+            "Flessibilità Oraria (turni)",
             min_value=0,
-            max_value=16,
-            value=8,
-            help="Numero massimo di ore in più o in meno rispetto al monte ore contrattuale",
+            max_value=4,
+            value=0,
+            help="Numero massimo di turni in più o in meno rispetto al monte ore contrattuale (1 turno = 8 ore)",
             key="hours_flexibility_slider"
         )
+        
+        # Calculate hours flexibility (convert shifts to hours)
+        hours_flexibility_value = hours_flexibility * 8
+        
+        # Work-to-rest ratio slider
+        work_rest_ratio = st.slider(
+            "Rapporto Lavoro-Riposo",
+            min_value=1.0,
+            max_value=5.0,
+            value=3.0,
+            step=0.5,
+            help="Rapporto massimo tra giorni di lavoro e giorni di riposo in qualsiasi periodo di 14 giorni. Un valore di 3 significa un massimo di 10-11 giorni di lavoro ogni 14 giorni.",
+            key="work_rest_ratio_slider"
+        )
+        
+        # Calculate window days - we don't display this information anymore, but calculate it for reference
+        window_size = 14
+        max_work_days = min(int(window_size * work_rest_ratio / (1 + work_rest_ratio)), window_size - 1)
         
         st.subheader("Ore Contrattuali")
         
@@ -143,7 +161,8 @@ class SchedulingView:
             'min_free_weekends': min_free_weekends,
             'max_consecutive_days': max_consecutive_days,
             'nurse_hours': st.session_state.nurse_hours,
-            'hours_flexibility': hours_flexibility
+            'hours_flexibility': hours_flexibility_value,
+            'work_rest_ratio': work_rest_ratio
         }
         
         # Track when month/year changes
@@ -427,7 +446,8 @@ class SchedulingView:
                         max_consecutive_days=config['max_consecutive_days'],
                         nurse_preferences=st.session_state.nurse_preferences,
                         freelancer_availability=st.session_state.freelancer_availability,
-                        hours_flexibility=config.get('hours_flexibility', 8)
+                        hours_flexibility=config.get('hours_flexibility', 8),
+                        work_rest_ratio=config.get('work_rest_ratio', 3.0)
                     )
                     
                     # Solve the problem
@@ -544,7 +564,7 @@ class SchedulingView:
                         help="Differenza tra ore pianificate e ore contrattuali"
                     ),
                     'Entro Flessibilità': st.column_config.CheckboxColumn(
-                        help=f"Indica se la differenza è entro il limite di flessibilità specificato ({flexibility} ore)"
+                        help=f"Indica se la differenza è entro il limite di flessibilità specificato ({flexibility//8} turni = {flexibility} ore)"
                     ),
                     'Weekend Liberi': st.column_config.NumberColumn(width="small"),
                     'Weekends Minimi': st.column_config.NumberColumn(width="small"),
@@ -627,11 +647,47 @@ class SchedulingView:
                 )
             
             # Export options
-            col1, col2, col3 = st.columns([1, 2, 1])
+            # st.subheader("Esporta Pianificazione")
             
-            with col2:
-                if st.button("Esporta in Excel", key="excel_button", use_container_width=True):
-                    st.session_state.export_excel_requested = True
+            # Create Excel download button that generates and downloads in one step
+            if 'schedule_result' in st.session_state and st.session_state.schedule_result[0]:
+                _, curr_schedule_df, hours_worked, free_weekends = st.session_state.schedule_result
+                config = st.session_state.config
+                
+                # Generate filename for download
+                filename = f"turni_{config['month']}_{config['year']}.xlsx"
+                
+                # Generate Excel file data
+                excel_data = None
+                with st.spinner("Preparazione file Excel..."):
+                    try:
+                        # Create model instance for export
+                        from model import SchedulingModel
+                        model = SchedulingModel()
+                        
+                        # Export to Excel in-memory
+                        excel_data = model.export_to_excel_bytes(
+                            curr_schedule_df,
+                            filename,
+                            hours_worked=hours_worked,
+                            nurse_hours=config['nurse_hours'],
+                            hours_flexibility=config.get('hours_flexibility', 8),
+                            free_weekends=free_weekends,
+                            min_free_weekends=config.get('min_free_weekends', 1)
+                        )
+                    except Exception as e:
+                        st.error(f"Errore durante l'esportazione: {str(e)}")
+                
+                # Create download button with the generated Excel data
+                if excel_data:
+                    st.download_button(
+                        label="Esporta in Excel",
+                        data=excel_data,
+                        file_name=filename,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="excel_download",
+                        use_container_width=True
+                    )
         
         elif 'schedule_result' in st.session_state and not st.session_state.schedule_result[0]:
             st.error("Impossibile trovare una soluzione valida con i vincoli specificati. Prova a modificare i parametri.")
