@@ -524,9 +524,8 @@ class SchedulingView:
             def highlight_shifts(row):
                 styles = [''] * len(row)
                 for i, val in enumerate(row):
-                    if i > 0:  # Skip the employee column
-                        if isinstance(val, str) and val in cell_formatter:
-                            styles[i] = cell_formatter[val]
+                    if i > 0 and isinstance(val, str) and val in cell_formatter:  # Skip the employee column
+                        styles[i] = cell_formatter[val]
                 return styles
             
             # Style the DataFrame
@@ -625,11 +624,11 @@ class SchedulingView:
                         freelancer_col = f"Libero Professionista {f_idx+1}"
                         if freelancer_col in schedule_df.columns:
                             shift_value = schedule_df.iloc[d][freelancer_col]
-                            if shift_value == "Mattino":
+                            if shift_value == "M":
                                 total_shifts += 1
                                 morning_shifts += 1
                                 total_hours += 8  # Assuming 8 hours per shift
-                            elif shift_value == "Pomeriggio":
+                            elif shift_value == "P":
                                 total_shifts += 1
                                 afternoon_shifts += 1
                                 total_hours += 8  # Assuming 8 hours per shift

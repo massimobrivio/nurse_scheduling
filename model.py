@@ -206,7 +206,7 @@ class SchedulingModel:
             # Ensure at least min_free_weekends are free
             if weekend_is_free[n]:
                 model.add(sum(weekend_is_free[n]) >= self.min_free_weekends)
-
+        
         # Create objective function with weighted components
         objective_terms = []
         
@@ -669,7 +669,7 @@ class SchedulingModel:
             'valign': 'top',
             'fg_color': '#D7E4BC',
             'border': 1})
-            
+        
         day_row_format = workbook.add_format({
             'bold': True,
             'text_wrap': True,
@@ -718,11 +718,11 @@ class SchedulingModel:
         # Set the header format
         for col_num, value in enumerate(transposed_df.columns.values):
             worksheet.write(0, col_num, value, header_format)
-            
+        
             # Apply weekend formatting to headers (highlight Saturday and Sunday)
             if col_num > 0 and ('Sab' in value or 'Dom' in value or 'Sat' in value or 'Sun' in value):
                 worksheet.set_column(col_num, col_num, 15, weekend_format)
-        
+            
         # Apply conditional formatting to shift cells
         for row_num, row in enumerate(transposed_df.iterrows(), start=1):
             for col_num, (col_name, cell_value) in enumerate(row[1].items()):
@@ -798,9 +798,9 @@ class SchedulingModel:
                                                           'format': good_format})
             
             summary_worksheet.conditional_format('H2:H100', {'type': 'cell',
-                                                          'criteria': '==',
-                                                          'value': '"No"',
-                                                          'format': bad_format})
+                                                         'criteria': '==',
+                                                         'value': '"No"',
+                                                         'format': bad_format})
         
         writer.close()
         
