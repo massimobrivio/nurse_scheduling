@@ -143,8 +143,8 @@ class SchedulingView:
         for i in range(num_nurses):
             st.session_state.max_nurse_hours[i] = st.number_input(
                 f"Ore Massime Regolari Infermiere {i+1}",
-                min_value=80,
-                max_value=200,
+                min_value=8,
+                max_value=250,
                 value=st.session_state.max_nurse_hours.get(i, 160),
                 key=f"max_nurse_hours_{i}"
             )
