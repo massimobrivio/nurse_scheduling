@@ -266,10 +266,16 @@ class SchedulingView:
         for nurse_idx in range(num_nurses):
             with nurse_tabs[nurse_idx]:
                 # st.subheader(f"Preferenze Infermiere {nurse_idx+1}")
-                st.write("Seleziona le preferenze per i turni: spunta le caselle per indicare i turni preferiti")
+                st.write("Seleziona le preferenze per i turni:")
                 
                 # Instructions
                 st.markdown("""
+                Per ogni turno, seleziona una delle opzioni:
+                - **Si**: Preferisce lavorare questo turno
+                - **No**: Preferisce non lavorare questo turno
+                - **Ferie**: Non può lavorare questo turno (vincolo obbligatorio)
+                
+                Legenda turni:
                 - **M**: Turno Mattina
                 - **P**: Turno Pomeriggio
                 """)
@@ -309,22 +315,52 @@ class SchedulingView:
                             
                             # Morning preference
                             morning_key = f"nurse_{nurse_idx}_morning_{day_num}_{month}_{year}"
-                            morning_pref = (day_num, 'M') in st.session_state.nurse_preferences[nurse_idx]
-                            morning = st.checkbox("M", key=morning_key, value=morning_pref)
+                            # Get current preference value (1 for "Si", -1 for "No", 0 for not set, 2 for "Ferie")
+                            morning_pref_value = st.session_state.nurse_preferences[nurse_idx].get((day_num, 'M'), 0)
+                            morning_pref_option = "Si" if morning_pref_value == 1 else ("No" if morning_pref_value == -1 else ("Ferie" if morning_pref_value == 2 else ""))
+                            
+                            # Create dropdown for morning preference
+                            morning_options = ["", "Si", "No", "Ferie"]
+                            selected_morning = st.selectbox(
+                                "M", 
+                                options=morning_options,
+                                index=morning_options.index(morning_pref_option),
+                                key=morning_key,
+                                label_visibility="visible"
+                            )
                             
                             # Afternoon preference
                             afternoon_key = f"nurse_{nurse_idx}_afternoon_{day_num}_{month}_{year}"
-                            afternoon_pref = (day_num, 'P') in st.session_state.nurse_preferences[nurse_idx]
-                            afternoon = st.checkbox("P", key=afternoon_key, value=afternoon_pref)
+                            # Get current preference value
+                            afternoon_pref_value = st.session_state.nurse_preferences[nurse_idx].get((day_num, 'P'), 0)
+                            afternoon_pref_option = "Si" if afternoon_pref_value == 1 else ("No" if afternoon_pref_value == -1 else ("Ferie" if afternoon_pref_value == 2 else ""))
+                            
+                            # Create dropdown for afternoon preference
+                            afternoon_options = ["", "Si", "No", "Ferie"]
+                            selected_afternoon = st.selectbox(
+                                "P", 
+                                options=afternoon_options,
+                                index=afternoon_options.index(afternoon_pref_option),
+                                key=afternoon_key,
+                                label_visibility="visible"
+                            )
                             
                             # Update preferences
-                            if morning:
+                            if selected_morning == "Si":
                                 st.session_state.nurse_preferences[nurse_idx][(day_num, 'M')] = 1
+                            elif selected_morning == "No":
+                                st.session_state.nurse_preferences[nurse_idx][(day_num, 'M')] = -1
+                            elif selected_morning == "Ferie":
+                                st.session_state.nurse_preferences[nurse_idx][(day_num, 'M')] = 2
                             else:
                                 st.session_state.nurse_preferences[nurse_idx].pop((day_num, 'M'), None)
                                 
-                            if afternoon:
+                            if selected_afternoon == "Si":
                                 st.session_state.nurse_preferences[nurse_idx][(day_num, 'P')] = 1
+                            elif selected_afternoon == "No":
+                                st.session_state.nurse_preferences[nurse_idx][(day_num, 'P')] = -1
+                            elif selected_afternoon == "Ferie":
+                                st.session_state.nurse_preferences[nurse_idx][(day_num, 'P')] = 2
                             else:
                                 st.session_state.nurse_preferences[nurse_idx].pop((day_num, 'P'), None)
                         
@@ -448,21 +484,21 @@ class SchedulingView:
                     )
                     
                     # Solve the problem
-                    success, schedule_df, hours_worked, free_weekends = model.solve()
+                    success, schedule_df, hours_worked, free_weekends, holiday_days = model.solve()
                     
                     # Store the result
-                    st.session_state.schedule_result = (success, schedule_df, hours_worked, free_weekends)
+                    st.session_state.schedule_result = (success, schedule_df, hours_worked, free_weekends, holiday_days)
                     
                     # Force a rerun to show the results
                     st.rerun()
                 
                 except Exception as e:
                     st.error(f"Errore durante la pianificazione: {str(e)}")
-                    st.session_state.schedule_result = (False, None, None, None)
+                    st.session_state.schedule_result = (False, None, None, None, None)
         
         # Display results if available
         if 'schedule_result' in st.session_state and st.session_state.schedule_result[0]:
-            success, schedule_df, hours_worked, free_weekends = st.session_state.schedule_result
+            success, schedule_df, hours_worked, free_weekends, holiday_days = st.session_state.schedule_result
             
             # Translate day names to Italian
             day_mapping = {
@@ -483,7 +519,8 @@ class SchedulingView:
                 "P": "background-color: #99ccff;",
                 "M (S)": "background-color: #ffcc99;",
                 "P (S)": "background-color: #99ccff; border: 2px solid #ff6666;",
-                "R": "background-color: #d9d9d9; color: #777777;"
+                "R": "background-color: #d9d9d9; color: #777777;",
+                "F": "background-color: #ffccff; color: #7700aa;"  # Light purple background for holidays
             }
             
             # Transpose the schedule dataframe - employees as rows, days as columns
@@ -565,6 +602,7 @@ class SchedulingView:
                 overtime_hours = hours_worked.get(f'{nurse_id}_overtime', 0)
                 target_weekends = config['min_free_weekends']
                 actual_weekends = free_weekends[nurse_id] if nurse_id in free_weekends else 0
+                num_holidays = holiday_days[nurse_id] if nurse_id in holiday_days else 0
                 max_ot_shifts = config.get('max_overhours', 1)
                 max_ot_hours = max_ot_shifts * 8
                 
@@ -574,6 +612,7 @@ class SchedulingView:
                     'Ore Straordinario': overtime_hours,
                     'Ore Lavorate': total_hours,
                     'Straordinario OK': overtime_hours <= max_ot_hours,
+                    'Giorni Ferie': num_holidays,
                     'Weekend Liberi': actual_weekends,
                     'Weekends Minimi': target_weekends,
                     'Weekends OK': actual_weekends >= target_weekends
@@ -592,6 +631,7 @@ class SchedulingView:
                     'Straordinario OK': st.column_config.CheckboxColumn(
                         help=f"Indica se le ore straordinarie sono entro il limite specificato ({max_ot_shifts} turni = {max_ot_hours} ore)"
                     ),
+                    'Giorni Ferie': st.column_config.NumberColumn(width="small"),
                     'Weekend Liberi': st.column_config.NumberColumn(width="small"),
                     'Weekends Minimi': st.column_config.NumberColumn(width="small"),
                     'Weekends OK': st.column_config.CheckboxColumn(
@@ -677,7 +717,7 @@ class SchedulingView:
             
             # Create Excel download button that generates and downloads in one step
             if 'schedule_result' in st.session_state and st.session_state.schedule_result[0]:
-                _, curr_schedule_df, hours_worked, free_weekends = st.session_state.schedule_result
+                _, curr_schedule_df, hours_worked, free_weekends, holiday_days = st.session_state.schedule_result
                 config = st.session_state.config
                 
                 # Generate filename for download
@@ -699,7 +739,8 @@ class SchedulingView:
                             nurse_hours=config['max_nurse_hours'],
                             hours_flexibility=config.get('max_overhours', 1) * 8,
                             free_weekends=free_weekends,
-                            min_free_weekends=config.get('min_free_weekends', 1)
+                            min_free_weekends=config.get('min_free_weekends', 1),
+                            holiday_days=holiday_days
                         )
                     except Exception as e:
                         st.error(f"Errore durante l'esportazione: {str(e)}")

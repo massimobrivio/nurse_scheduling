@@ -32,7 +32,27 @@ class SchedulingModel:
                    nurse_preferences: Dict[int, Dict[Tuple[int, str], int]], 
                    freelancer_availability: Dict[int, Dict[Tuple[int, str], int]],
                    max_overhours: int = 1, work_rest_ratio: float = 3.0):
-        """Setup the model with the provided parameters"""
+        """Setup the model with the provided parameters
+        
+        Parameters:
+        ----------
+        year: Year of the scheduling period
+        month: Month of the scheduling period
+        num_nurses: Number of nurses
+        num_freelancers: Number of freelancers
+        max_nurse_hours: Dictionary mapping nurse IDs to their maximum regular hours
+        min_free_weekends: Minimum number of free weekends per nurse
+        max_consecutive_days: Maximum consecutive days a nurse can work
+        nurse_preferences: Dictionary mapping nurse IDs to their preferences
+                         Each preference is a tuple (day, shift) mapping to a value:
+                         1 = prefer to work ("Si")
+                         -1 = prefer not to work ("No")
+                         2 = cannot work - holiday ("Ferie")
+        freelancer_availability: Dictionary mapping freelancer IDs to their availability
+                               Each availability is a tuple (day, shift) mapping to 1 if available
+        max_overhours: Maximum overtime shifts per nurse
+        work_rest_ratio: Maximum ratio of work to rest days in any 14-day period
+        """
         self.year = year
         self.month = month
         self.num_nurses = num_nurses
@@ -63,7 +83,7 @@ class SchedulingModel:
         
         return weekend_pairs
     
-    def solve(self) -> Tuple[bool, Optional[pd.DataFrame], Optional[Dict[int, int]], Optional[Dict[int, int]]]:
+    def solve(self) -> Tuple[bool, Optional[pd.DataFrame], Optional[Dict[int, int]], Optional[Dict[int, int]], Optional[Dict[int, int]]]:
         """Solve the nurse scheduling problem and return the result"""
         model = cp_model.CpModel()
         
@@ -140,6 +160,15 @@ class SchedulingModel:
                     day_key = (d + 1, self.shifts[s])  # Convert to 1-indexed days
                     if day_key not in self.freelancer_availability[f_idx] or self.freelancer_availability[f_idx][day_key] == 0:
                         model.add(shifts[(f, d, s)] == 0)
+        
+        # Enforce holiday constraints for nurses (Ferie = 2)
+        for n in all_nurses:
+            for d in all_days:
+                for s in all_shifts:
+                    day_key = (d + 1, self.shifts[s])  # Convert to 1-indexed days
+                    if day_key in self.nurse_preferences[n] and self.nurse_preferences[n][day_key] == 2:
+                        # This is a holiday constraint - nurse cannot work this shift
+                        model.add(shifts[(n, d, s)] == 0)
         
         # No more than max_consecutive_days worked in a row
         for e in all_employees:
@@ -225,7 +254,12 @@ class SchedulingModel:
                 for s in all_shifts:
                     day_key = (d + 1, self.shifts[s])  # Convert to 1-indexed days
                     if day_key in self.nurse_preferences[n]:
-                        objective_terms.append(shifts[(n, d, s)] * self.nurse_preferences[n][day_key] * nurse_pref_scale)
+                        pref_value = self.nurse_preferences[n][day_key]
+                        if pref_value == 1:  # Preference to work (Si)
+                            objective_terms.append(shifts[(n, d, s)] * nurse_pref_scale)
+                        elif pref_value == -1:  # Preference not to work (No)
+                            # Add a penalty for assigning shifts against preferences
+                            objective_terms.append(-shifts[(n, d, s)] * nurse_pref_scale)
         
         # 2. Assignment costs - MINIMIZE (40% weight)
         # We'll negate these terms since we're maximizing the objective
@@ -288,6 +322,12 @@ class SchedulingModel:
                 # Add nurses as columns
                 for n in all_nurses:
                     employee_name = f"Infermiere {n+1}"
+                    # Check if this is a holiday for this nurse
+                    day_key_m = (d + 1, 'M')  # Convert to 1-indexed days for morning
+                    day_key_p = (d + 1, 'P')  # Convert to 1-indexed days for afternoon
+                    is_holiday = ((day_key_m in self.nurse_preferences[n] and self.nurse_preferences[n][day_key_m] == 2) or
+                                 (day_key_p in self.nurse_preferences[n] and self.nurse_preferences[n][day_key_p] == 2))
+                    
                     if solver.value(shifts[(n, d, 0)]) == 1:  # Morning shift
                         is_overhour = solver.value(overhour_shifts[(n, d, 0)]) == 1
                         row_data[employee_name] = "M (S)" if is_overhour else "M"
@@ -305,7 +345,8 @@ class SchedulingModel:
                         else:
                             regular_hours_worked[n] += self.shift_duration
                     else:
-                        row_data[employee_name] = "R"
+                        # If it's a holiday, mark it as "F" instead of "R"
+                        row_data[employee_name] = "F" if is_holiday else "R"
                 
                 # Add freelancers as columns
                 for f_idx, f in enumerate(range(self.num_nurses, self.num_nurses + self.num_freelancers)):
@@ -324,7 +365,22 @@ class SchedulingModel:
             
             # Calculate free weekends for each nurse
             free_weekends = {n: 0 for n in all_nurses}
+            
+            # Count holiday days for each nurse
+            holiday_days = {n: 0 for n in all_nurses}
             for n in all_nurses:
+                # Count days with "F" (Ferie) status
+                for d in all_days:
+                    day_key_m = (d + 1, 'M')
+                    day_key_p = (d + 1, 'P')
+                    morning_holiday = day_key_m in self.nurse_preferences[n] and self.nurse_preferences[n][day_key_m] == 2
+                    afternoon_holiday = day_key_p in self.nurse_preferences[n] and self.nurse_preferences[n][day_key_p] == 2
+                    
+                    # Count as one holiday day if either or both shifts are marked as holiday
+                    if morning_holiday or afternoon_holiday:
+                        holiday_days[n] += 1
+                
+                # Calculate free weekends
                 for sat_idx, sun_idx in weekend_pairs:
                     sat_free = True
                     sun_free = True
@@ -380,7 +436,7 @@ class SchedulingModel:
                 hours_worked[f'{n}_regular'] = regular_hours_worked[n]
                 hours_worked[f'{n}_overtime'] = overhours_worked[n]
             
-            return True, schedule_df, hours_worked, free_weekends
+            return True, schedule_df, hours_worked, free_weekends, holiday_days
         else:
             print(f"Solve status: {status}")
             if status == cp_model.INFEASIBLE:
@@ -389,9 +445,9 @@ class SchedulingModel:
                 print("Il modello è invalido.")
             elif status == cp_model.UNKNOWN:
                 print("Il solutore non è riuscito a trovare una soluzione entro il tempo limite.")
-            return False, None, None, None
+            return False, None, None, None, None
     
-    def export_to_excel(self, schedule_df, filename="schedule.xlsx", hours_worked=None, nurse_hours=None, hours_flexibility=None, free_weekends=None, min_free_weekends=None):
+    def export_to_excel(self, schedule_df, filename="schedule.xlsx", hours_worked=None, nurse_hours=None, hours_flexibility=None, free_weekends=None, min_free_weekends=None, holiday_days=None):
         """Export the schedule to an Excel file"""
         writer = pd.ExcelWriter(filename, engine='xlsxwriter')
         schedule_df.to_excel(writer, sheet_name='Pianificazione', index=False)
@@ -405,6 +461,7 @@ class SchedulingModel:
                 actual_hours = hours_worked[nurse_id] if nurse_id in hours_worked else 0
                 target_weekends = min_free_weekends or 1
                 actual_weekends = free_weekends[nurse_id] if nurse_id in free_weekends else 0
+                num_holidays = holiday_days[nurse_id] if holiday_days and nurse_id in holiday_days else 0
                 hours_diff = actual_hours - target_hours
                 flex = hours_flexibility if hours_flexibility is not None else 0
                 
@@ -414,6 +471,7 @@ class SchedulingModel:
                     'Ore Pianificate': actual_hours,
                     'Differenza Ore': hours_diff,
                     'Entro Flessibilità': "Sì" if abs(hours_diff) <= flex else "No",
+                    'Giorni Ferie': num_holidays,
                     'Weekend Liberi': actual_weekends,
                     'Weekends Minimi': target_weekends,
                     'Weekends OK': "Sì" if actual_weekends >= target_weekends else "No"
@@ -473,6 +531,12 @@ class SchedulingModel:
             'font_color': '#777777',
             'border': 1,
             'align': 'center'})
+            
+        holiday_format = workbook.add_format({
+            'fg_color': '#FFCCFF',
+            'font_color': '#7700AA',
+            'border': 1,
+            'align': 'center'})
         
         # Set column widths
         worksheet.set_column('A:A', 12)  # Date
@@ -505,6 +569,8 @@ class SchedulingModel:
                         worksheet.write(row_num, col_num, cell_value, afternoon_format)
                     elif cell_value == "R":
                         worksheet.write(row_num, col_num, cell_value, rest_format)
+                    elif cell_value == "F":
+                        worksheet.write(row_num, col_num, cell_value, holiday_format)
         
         # Format the summary sheet if available
         if hours_worked and nurse_hours and free_weekends:
@@ -516,9 +582,10 @@ class SchedulingModel:
             summary_worksheet.set_column('C:C', 15)  # Ore Pianificate
             summary_worksheet.set_column('D:D', 15)  # Differenza Ore
             summary_worksheet.set_column('E:E', 15)  # Entro Flessibilità
-            summary_worksheet.set_column('F:F', 15)  # Weekend Liberi
-            summary_worksheet.set_column('G:G', 15)  # Weekends Minimi
-            summary_worksheet.set_column('H:H', 15)  # Weekends OK
+            summary_worksheet.set_column('F:F', 15)  # Giorni Ferie
+            summary_worksheet.set_column('G:G', 15)  # Weekend Liberi
+            summary_worksheet.set_column('H:H', 15)  # Weekends Minimi
+            summary_worksheet.set_column('I:I', 15)  # Weekends OK
             
             # Set the header format
             for col_num, value in enumerate(summary_df.columns.values):
@@ -540,15 +607,15 @@ class SchedulingModel:
                                                           'format': bad_format})
             
             # Apply conditional formatting to the "Weekends OK" column
-            summary_worksheet.conditional_format('H2:H100', {'type': 'cell',
+            summary_worksheet.conditional_format('I2:I100', {'type': 'cell',
                                                           'criteria': '==',
                                                           'value': '"Sì"',
                                                           'format': good_format})
             
-            summary_worksheet.conditional_format('H2:H100', {'type': 'cell',
-                                                          'criteria': '==',
-                                                          'value': '"No"',
-                                                          'format': bad_format})
+            summary_worksheet.conditional_format('I2:I100', {'type': 'cell',
+                                                         'criteria': '==',
+                                                         'value': '"No"',
+                                                         'format': bad_format})
         
         # Format the hours worked sheet if available
         if hours_worked and nurse_hours:
@@ -583,7 +650,7 @@ class SchedulingModel:
         writer.close()
         return filename
 
-    def export_to_excel_bytes(self, schedule_df, filename="schedule.xlsx", hours_worked=None, nurse_hours=None, hours_flexibility=None, free_weekends=None, min_free_weekends=None):
+    def export_to_excel_bytes(self, schedule_df, filename="schedule.xlsx", hours_worked=None, nurse_hours=None, hours_flexibility=None, free_weekends=None, min_free_weekends=None, holiday_days=None):
         """Export the schedule to an Excel file and return the bytes"""
         output = io.BytesIO()
         writer = pd.ExcelWriter(output, engine='xlsxwriter')
@@ -630,26 +697,21 @@ class SchedulingModel:
             # Create a DataFrame for summary
             summary_data = []
             for nurse_id in range(len(nurse_hours)):
-                max_hours = nurse_hours[nurse_id]
-                total_hours = hours_worked[nurse_id] if nurse_id in hours_worked else 0
-                
-                # Get regular and overtime hours if available
-                regular_hours = hours_worked.get(f'{nurse_id}_regular', 0)
-                overtime_hours = hours_worked.get(f'{nurse_id}_overtime', 0)
-                
+                target_hours = nurse_hours[nurse_id]
+                actual_hours = hours_worked[nurse_id] if nurse_id in hours_worked else 0
                 target_weekends = min_free_weekends or 1
                 actual_weekends = free_weekends[nurse_id] if nurse_id in free_weekends else 0
-                max_ot_hours = hours_flexibility if hours_flexibility is not None else 8
-                
-                # Check if overtime is within limits
-                overtime_ok = "Sì" if overtime_hours <= max_ot_hours else "No"
+                num_holidays = holiday_days[nurse_id] if holiday_days and nurse_id in holiday_days else 0
+                hours_diff = actual_hours - target_hours
+                flex = hours_flexibility if hours_flexibility is not None else 0
                 
                 summary_data.append({
                     'Infermiere': f"Infermiere {nurse_id + 1}",
-                    'Ore Target': max_hours,
-                    'Ore Straordinario': overtime_hours,
-                    'Ore Lavorate': total_hours,
-                    'Straordinario OK': overtime_ok,
+                    'Ore Contrattuali': target_hours,
+                    'Ore Pianificate': actual_hours,
+                    'Differenza Ore': hours_diff,
+                    'Entro Flessibilità': "Sì" if abs(hours_diff) <= flex else "No",
+                    'Giorni Ferie': num_holidays,
                     'Weekend Liberi': actual_weekends,
                     'Weekends Minimi': target_weekends,
                     'Weekends OK': "Sì" if actual_weekends >= target_weekends else "No"
@@ -703,7 +765,13 @@ class SchedulingModel:
             'font_color': '#777777',
             'border': 1,
             'align': 'center'})
-        
+            
+        holiday_format = workbook.add_format({
+            'fg_color': '#FFCCFF',
+            'font_color': '#7700AA',
+            'border': 1,
+            'align': 'center'})
+            
         weekend_format = workbook.add_format({
             'bg_color': '#FFCCCC',
         })
@@ -751,6 +819,8 @@ class SchedulingModel:
                             worksheet.write(row_num, col_num, cell_value, p_overtime_format)
                         elif cell_value == "R":
                             worksheet.write(row_num, col_num, cell_value, r_format)
+                        elif cell_value == "F":
+                            worksheet.write(row_num, col_num, cell_value, holiday_format)
                 else:
                     # Write employee name or day label
                     if row_num == 1:  # This is the day name row
@@ -764,13 +834,14 @@ class SchedulingModel:
             
             # Set column widths
             summary_worksheet.set_column('A:A', 15)  # Infermiere
-            summary_worksheet.set_column('B:B', 15)  # Ore Target
-            summary_worksheet.set_column('C:C', 15)  # Ore Straordinario
-            summary_worksheet.set_column('D:D', 15)  # Ore Lavorate
-            summary_worksheet.set_column('E:E', 15)  # Straordinario OK
-            summary_worksheet.set_column('F:F', 15)  # Weekend Liberi
-            summary_worksheet.set_column('G:G', 15)  # Weekends Minimi
-            summary_worksheet.set_column('H:H', 15)  # Weekends OK
+            summary_worksheet.set_column('B:B', 15)  # Ore Contrattuali
+            summary_worksheet.set_column('C:C', 15)  # Ore Pianificate
+            summary_worksheet.set_column('D:D', 15)  # Differenza Ore
+            summary_worksheet.set_column('E:E', 15)  # Entro Flessibilità
+            summary_worksheet.set_column('F:F', 15)  # Giorni Ferie
+            summary_worksheet.set_column('G:G', 15)  # Weekend Liberi
+            summary_worksheet.set_column('H:H', 15)  # Weekends Minimi
+            summary_worksheet.set_column('I:I', 15)  # Weekends OK
             
             # Set the header format
             for col_num, value in enumerate(summary_df.columns.values):
@@ -780,7 +851,7 @@ class SchedulingModel:
             good_format = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100'})
             bad_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
             
-            # Apply conditional formatting to the "Straordinario OK" column
+            # Apply conditional formatting to the "Entro Flessibilità" column
             summary_worksheet.conditional_format('E2:E100', {'type': 'cell',
                                                           'criteria': '==',
                                                           'value': '"Sì"',
@@ -792,12 +863,12 @@ class SchedulingModel:
                                                           'format': bad_format})
             
             # Apply conditional formatting to the "Weekends OK" column
-            summary_worksheet.conditional_format('H2:H100', {'type': 'cell',
+            summary_worksheet.conditional_format('I2:I100', {'type': 'cell',
                                                           'criteria': '==',
                                                           'value': '"Sì"',
                                                           'format': good_format})
             
-            summary_worksheet.conditional_format('H2:H100', {'type': 'cell',
+            summary_worksheet.conditional_format('I2:I100', {'type': 'cell',
                                                          'criteria': '==',
                                                          'value': '"No"',
                                                          'format': bad_format})
