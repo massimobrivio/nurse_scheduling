@@ -42,12 +42,12 @@ class SchedulingController:
                 month=config['month'],
                 num_nurses=config['num_nurses'],
                 num_freelancers=config['num_freelancers'],
-                nurse_hours=config['nurse_hours'],
+                max_nurse_hours=config['max_nurse_hours'],
                 min_free_weekends=config['min_free_weekends'],
                 max_consecutive_days=config['max_consecutive_days'],
                 nurse_preferences=st.session_state.nurse_preferences,
                 freelancer_availability=st.session_state.freelancer_availability,
-                hours_flexibility=config.get('hours_flexibility', 8),
+                max_overhours=config.get('max_overhours', 1),
                 work_rest_ratio=config.get('work_rest_ratio', 3.0)
             )
             

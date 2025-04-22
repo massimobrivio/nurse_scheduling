@@ -105,17 +105,14 @@ class SchedulingView:
             key="max_consecutive_days_slider"
         )
         
-        hours_flexibility = st.slider(
-            "Flessibilità Oraria (turni)",
+        max_overhours = st.slider(
+            "Massimo Straordinario (turni)",
             min_value=0,
-            max_value=4,
-            value=0,
-            help="Numero massimo di turni in più o in meno rispetto al monte ore contrattuale (1 turno = 8 ore)",
-            key="hours_flexibility_slider"
+            max_value=5,
+            value=1,
+            help="Numero massimo di turni straordinari che un infermiere può fare al mese (1 turno = 8 ore)",
+            key="max_overhours_slider"
         )
-        
-        # Calculate hours flexibility (convert shifts to hours)
-        hours_flexibility_value = hours_flexibility * 8
         
         # Work-to-rest ratio slider
         work_rest_ratio = st.slider(
@@ -132,24 +129,24 @@ class SchedulingView:
         window_size = 14
         max_work_days = min(int(window_size * work_rest_ratio / (1 + work_rest_ratio)), window_size - 1)
         
-        st.subheader("Ore Contrattuali")
+        st.subheader("Ore Massime per Infermiere")
         
-        # Store nurse hours in session state
-        if 'nurse_hours' not in st.session_state:
-            st.session_state.nurse_hours = {i: 160 for i in range(num_nurses)}
+        # Store max nurse hours in session state
+        if 'max_nurse_hours' not in st.session_state:
+            st.session_state.max_nurse_hours = {i: 160 for i in range(num_nurses)}
         
         # Update session state if number of nurses changes
-        if len(st.session_state.nurse_hours) != num_nurses:
-            st.session_state.nurse_hours = {i: 160 for i in range(num_nurses)}
+        if len(st.session_state.max_nurse_hours) != num_nurses:
+            st.session_state.max_nurse_hours = {i: 160 for i in range(num_nurses)}
         
         # Display input fields for each nurse's hours
         for i in range(num_nurses):
-            st.session_state.nurse_hours[i] = st.number_input(
-                f"Ore Mensili Infermiere {i+1}",
+            st.session_state.max_nurse_hours[i] = st.number_input(
+                f"Ore Massime Regolari Infermiere {i+1}",
                 min_value=80,
                 max_value=200,
-                value=st.session_state.nurse_hours.get(i, 160),
-                key=f"nurse_hours_{i}"
+                value=st.session_state.max_nurse_hours.get(i, 160),
+                key=f"max_nurse_hours_{i}"
             )
         
         # Store configuration in session state
@@ -160,8 +157,8 @@ class SchedulingView:
             'num_freelancers': num_freelancers,
             'min_free_weekends': min_free_weekends,
             'max_consecutive_days': max_consecutive_days,
-            'nurse_hours': st.session_state.nurse_hours,
-            'hours_flexibility': hours_flexibility_value,
+            'max_nurse_hours': st.session_state.max_nurse_hours,
+            'max_overhours': max_overhours,
             'work_rest_ratio': work_rest_ratio
         }
         
@@ -441,12 +438,12 @@ class SchedulingView:
                         month=config['month'],
                         num_nurses=config['num_nurses'],
                         num_freelancers=config['num_freelancers'],
-                        nurse_hours=config['nurse_hours'],
+                        max_nurse_hours=config['max_nurse_hours'],
                         min_free_weekends=config['min_free_weekends'],
                         max_consecutive_days=config['max_consecutive_days'],
                         nurse_preferences=st.session_state.nurse_preferences,
                         freelancer_availability=st.session_state.freelancer_availability,
-                        hours_flexibility=config.get('hours_flexibility', 8),
+                        max_overhours=config.get('max_overhours', 1),
                         work_rest_ratio=config.get('work_rest_ratio', 3.0)
                     )
                     
@@ -482,46 +479,78 @@ class SchedulingView:
             
             # Define shift color scheme
             cell_formatter = {
-                "Mattino": "background-color: #ffeb99;",
-                "Pomeriggio": "background-color: #99ccff;",
-                "Riposo": "background-color: #d9d9d9; color: #777777;"
+                "M": "background-color: #ffeb99;",
+                "P": "background-color: #99ccff;",
+                "M (S)": "background-color: #ffcc99;",
+                "P (S)": "background-color: #99ccff; border: 2px solid #ff6666;",
+                "R": "background-color: #d9d9d9; color: #777777;"
             }
+            
+            # Transpose the schedule dataframe - employees as rows, days as columns
+            # First, create a list of employees (all columns except Data and Giorno)
+            employees = [col for col in schedule_df.columns if col not in ['Data', 'Giorno']]
+            
+            # Create a new dataframe with employees as rows
+            transposed_data = []
+            
+            # Create day header labels
+            day_headers = []
+            for idx, row in schedule_df.iterrows():
+                day_label = f"{row['Data']} ({row['Giorno'][:3]})"
+                day_headers.append(day_label)
+            
+            # First, create a row for day names
+            days_row = {'Dipendente': 'Giorno'}
+            for idx, day_header in enumerate(day_headers):
+                # Get the original day name from the dataframe
+                day_name = schedule_df.iloc[idx]['Giorno']
+                days_row[day_header] = day_name
+            
+            transposed_data.append(days_row)
+            
+            # Then add one row per employee
+            for employee in employees:
+                employee_shifts = {'Dipendente': employee}
+                
+                # Add one column for each day
+                for idx, day_header in enumerate(day_headers):
+                    employee_shifts[day_header] = schedule_df.iloc[idx][employee]
+                
+                transposed_data.append(employee_shifts)
+            
+            transposed_df = pd.DataFrame(transposed_data)
             
             # Apply styling function to highlight shifts
             def highlight_shifts(row):
                 styles = [''] * len(row)
                 for i, val in enumerate(row):
-                    if isinstance(val, str) and val in cell_formatter:
-                        styles[i] = cell_formatter[val]
+                    if i > 0:  # Skip the employee column
+                        if isinstance(val, str) and val in cell_formatter:
+                            styles[i] = cell_formatter[val]
                 return styles
             
             # Style the DataFrame
-            styled_df = schedule_df.style.apply(highlight_shifts, axis=1)
+            styled_df = transposed_df.style.apply(highlight_shifts, axis=1)
             
             # Display the schedule
             st.subheader("Pianificazione Turni")
             
             # Configure columns for display
             column_config = {
-                'Data': st.column_config.TextColumn(width="small"),
-                'Giorno': st.column_config.TextColumn(width="small")
+                'Dipendente': st.column_config.TextColumn(width="medium")
             }
             
-            # Add employee columns to configuration
-            for col in schedule_df.columns:
-                if col not in ['Data', 'Giorno'] and any(schedule_df[col].notna()):
-                    column_config[col] = st.column_config.SelectboxColumn(
-                        options=["Mattino", "Pomeriggio", "Riposo"],
-                        width="small",
-                        disabled=True
-                    )
+            # Add day columns to configuration
+            for col in transposed_df.columns:
+                if col != 'Dipendente':
+                    column_config[col] = st.column_config.TextColumn(width="small")
             
             st.dataframe(
-                schedule_df,
+                transposed_df,
                 column_config=column_config,
                 hide_index=True,
                 key="results_dataframe",
-                height=600  # Make it taller to fit all days
+                height=min(600, 100 + (len(employees) + 1) * 35)  # Adjust height based on number of rows
             )
             
             # Create and display summary table
@@ -532,19 +561,20 @@ class SchedulingView:
             config = st.session_state.config
             
             for nurse_id in range(config['num_nurses']):
-                target_hours = config['nurse_hours'][nurse_id]
-                actual_hours = hours_worked[nurse_id] if nurse_id in hours_worked else 0
+                max_hours = config['max_nurse_hours'][nurse_id]
+                total_hours = hours_worked[nurse_id] if nurse_id in hours_worked else 0
+                overtime_hours = hours_worked.get(f'{nurse_id}_overtime', 0)
                 target_weekends = config['min_free_weekends']
                 actual_weekends = free_weekends[nurse_id] if nurse_id in free_weekends else 0
-                hours_diff = actual_hours - target_hours
-                flexibility = config.get('hours_flexibility', 8)
+                max_ot_shifts = config.get('max_overhours', 1)
+                max_ot_hours = max_ot_shifts * 8
                 
                 summary_data.append({
                     'Infermiere': f"Infermiere {nurse_id + 1}",
-                    'Ore Contrattuali': target_hours,
-                    'Ore Pianificate': actual_hours,
-                    'Differenza Ore': hours_diff,
-                    'Entro Flessibilità': abs(hours_diff) <= flexibility,
+                    'Ore Target': max_hours,
+                    'Ore Straordinario': overtime_hours,
+                    'Ore Lavorate': total_hours,
+                    'Straordinario OK': overtime_hours <= max_ot_hours,
                     'Weekend Liberi': actual_weekends,
                     'Weekends Minimi': target_weekends,
                     'Weekends OK': actual_weekends >= target_weekends
@@ -557,14 +587,11 @@ class SchedulingView:
                 summary_df,
                 column_config={
                     'Infermiere': st.column_config.TextColumn(width="medium"),
-                    'Ore Contrattuali': st.column_config.NumberColumn(format="%d ore", width="small"),
-                    'Ore Pianificate': st.column_config.NumberColumn(format="%d ore", width="small"),
-                    'Differenza Ore': st.column_config.NumberColumn(
-                        format="%d ore",
-                        help="Differenza tra ore pianificate e ore contrattuali"
-                    ),
-                    'Entro Flessibilità': st.column_config.CheckboxColumn(
-                        help=f"Indica se la differenza è entro il limite di flessibilità specificato ({flexibility//8} turni = {flexibility} ore)"
+                    'Ore Target': st.column_config.NumberColumn(format="%d ore", width="small"),
+                    'Ore Straordinario': st.column_config.NumberColumn(format="%d ore", width="small"),
+                    'Ore Lavorate': st.column_config.NumberColumn(format="%d ore", width="small"),
+                    'Straordinario OK': st.column_config.CheckboxColumn(
+                        help=f"Indica se le ore straordinarie sono entro il limite specificato ({max_ot_shifts} turni = {max_ot_hours} ore)"
                     ),
                     'Weekend Liberi': st.column_config.NumberColumn(width="small"),
                     'Weekends Minimi': st.column_config.NumberColumn(width="small"),
@@ -670,8 +697,8 @@ class SchedulingView:
                             curr_schedule_df,
                             filename,
                             hours_worked=hours_worked,
-                            nurse_hours=config['nurse_hours'],
-                            hours_flexibility=config.get('hours_flexibility', 8),
+                            nurse_hours=config['max_nurse_hours'],
+                            hours_flexibility=config.get('max_overhours', 1) * 8,
                             free_weekends=free_weekends,
                             min_free_weekends=config.get('min_free_weekends', 1)
                         )
