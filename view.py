@@ -262,6 +262,32 @@ class SchedulingView:
                 for i in range(num_freelancers)
             }
         
+        # Helper function to handle ferie selection synchronization
+        def handle_ferie_selection(nurse_idx, day_num, shift, selection):
+            other_shift = 'P' if shift == 'M' else 'M'
+            other_key = f"nurse_{nurse_idx}_{other_shift.lower()}_{day_num}_{month}_{year}"
+            
+            # If this shift is set to Ferie, set the other shift to Ferie too
+            if selection == "Ferie":
+                st.session_state[other_key] = "Ferie"
+                st.session_state.nurse_preferences[nurse_idx][(day_num, shift)] = 2
+                st.session_state.nurse_preferences[nurse_idx][(day_num, other_shift)] = 2
+            else:
+                # Update only this shift's preference
+                if selection == "Si":
+                    st.session_state.nurse_preferences[nurse_idx][(day_num, shift)] = 1
+                elif selection == "No":
+                    st.session_state.nurse_preferences[nurse_idx][(day_num, shift)] = -1
+                else:
+                    st.session_state.nurse_preferences[nurse_idx].pop((day_num, shift), None)
+                
+                # If other shift was Ferie, keep it as Ferie
+                if (day_num, other_shift) in st.session_state.nurse_preferences and st.session_state.nurse_preferences[nurse_idx][(day_num, other_shift)] == 2:
+                    # This is no longer valid - a day is either entirely ferie or not
+                    # If one shift is not ferie, the other can't remain as ferie
+                    st.session_state.nurse_preferences[nurse_idx].pop((day_num, other_shift), None)
+                    st.session_state[other_key] = ""
+        
         # Process nurse preferences
         for nurse_idx in range(num_nurses):
             with nurse_tabs[nurse_idx]:
@@ -274,6 +300,8 @@ class SchedulingView:
                 - **Si**: Preferisce lavorare questo turno
                 - **No**: Preferisce non lavorare questo turno
                 - **Ferie**: Non può lavorare questo turno (vincolo obbligatorio)
+                
+                **Nota**: Quando selezioni "Ferie" per un turno, l'intero giorno sarà marcato come giorno di ferie.
                 
                 Legenda turni:
                 - **M**: Turno Mattina
@@ -326,7 +354,9 @@ class SchedulingView:
                                 options=morning_options,
                                 index=morning_options.index(morning_pref_option),
                                 key=morning_key,
-                                label_visibility="visible"
+                                label_visibility="visible",
+                                on_change=lambda n=nurse_idx, d=day_num, s='M', k=morning_key: 
+                                    handle_ferie_selection(n, d, s, st.session_state[k])
                             )
                             
                             # Afternoon preference
@@ -342,27 +372,10 @@ class SchedulingView:
                                 options=afternoon_options,
                                 index=afternoon_options.index(afternoon_pref_option),
                                 key=afternoon_key,
-                                label_visibility="visible"
+                                label_visibility="visible",
+                                on_change=lambda n=nurse_idx, d=day_num, s='P', k=afternoon_key: 
+                                    handle_ferie_selection(n, d, s, st.session_state[k])
                             )
-                            
-                            # Update preferences
-                            if selected_morning == "Si":
-                                st.session_state.nurse_preferences[nurse_idx][(day_num, 'M')] = 1
-                            elif selected_morning == "No":
-                                st.session_state.nurse_preferences[nurse_idx][(day_num, 'M')] = -1
-                            elif selected_morning == "Ferie":
-                                st.session_state.nurse_preferences[nurse_idx][(day_num, 'M')] = 2
-                            else:
-                                st.session_state.nurse_preferences[nurse_idx].pop((day_num, 'M'), None)
-                                
-                            if selected_afternoon == "Si":
-                                st.session_state.nurse_preferences[nurse_idx][(day_num, 'P')] = 1
-                            elif selected_afternoon == "No":
-                                st.session_state.nurse_preferences[nurse_idx][(day_num, 'P')] = -1
-                            elif selected_afternoon == "Ferie":
-                                st.session_state.nurse_preferences[nurse_idx][(day_num, 'P')] = 2
-                            else:
-                                st.session_state.nurse_preferences[nurse_idx].pop((day_num, 'P'), None)
                         
                         day_slots_used += 1
                     

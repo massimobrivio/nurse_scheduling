@@ -181,6 +181,58 @@ class SchedulingModel:
                             consecutive_shifts.append(shifts[(e, d, s)])
                 model.add(sum(consecutive_shifts) <= self.max_consecutive_days)
         
+        # Maximum consecutive holiday days (6) before requiring a rest day for nurses
+        max_consecutive_holidays = 6
+        for n in all_nurses:
+            for start_day in range(self.num_days - max_consecutive_holidays):
+                # Check sequential holiday days
+                holiday_sequence = []
+                
+                # Collect holiday status for each day in the sequence
+                for d in range(start_day, start_day + max_consecutive_holidays + 1):
+                    if d < self.num_days:  # Ensure we don't go beyond the month
+                        # A day is considered a holiday if either morning or afternoon shift is marked as holiday (2)
+                        day_is_holiday = model.new_bool_var(f"day_is_holiday_n{n}_d{d}")
+                        
+                        morning_key = (d + 1, 'M')  # Convert to 1-indexed days
+                        afternoon_key = (d + 1, 'P')  # Convert to 1-indexed days
+                        
+                        morning_holiday = (morning_key in self.nurse_preferences[n] and 
+                                          self.nurse_preferences[n][morning_key] == 2)
+                        afternoon_holiday = (afternoon_key in self.nurse_preferences[n] and 
+                                            self.nurse_preferences[n][afternoon_key] == 2)
+                        
+                        # day_is_holiday is 1 if either morning or afternoon is a holiday
+                        if morning_holiday or afternoon_holiday:
+                            model.add(day_is_holiday == 1)
+                        else:
+                            model.add(day_is_holiday == 0)
+                        
+                        holiday_sequence.append(day_is_holiday)
+                
+                # If we have 7 days to check (max_consecutive_holidays + 1)
+                if len(holiday_sequence) == max_consecutive_holidays + 1:
+                    # Create a variable for if we have 6 consecutive holiday days
+                    six_consecutive_holidays = model.new_bool_var(f"six_holidays_n{n}_start{start_day}")
+                    
+                    # six_consecutive_holidays is 1 if and only if the first 6 days are all holidays
+                    model.add(sum(holiday_sequence[:max_consecutive_holidays]) >= max_consecutive_holidays).only_enforce_if(six_consecutive_holidays)
+                    model.add(sum(holiday_sequence[:max_consecutive_holidays]) < max_consecutive_holidays).only_enforce_if(six_consecutive_holidays.Not())
+                    
+                    # If we have 6 consecutive holidays, the 7th day must be a rest day (not a work day, not a holiday)
+                    seventh_day_idx = start_day + max_consecutive_holidays
+                    if seventh_day_idx < self.num_days:
+                        # 7th day is not a holiday
+                        model.add(holiday_sequence[-1] == 0).only_enforce_if(six_consecutive_holidays)
+                        
+                        # 7th day is not a work day (no shifts assigned)
+                        seventh_day_not_working = model.new_bool_var(f"seventh_day_not_working_n{n}_start{start_day}")
+                        model.add(sum(shifts[(n, seventh_day_idx, s)] for s in all_shifts) == 0).only_enforce_if(seventh_day_not_working)
+                        model.add(sum(shifts[(n, seventh_day_idx, s)] for s in all_shifts) > 0).only_enforce_if(seventh_day_not_working.Not())
+                        
+                        # If we have 6 consecutive holidays, 7th day must be a rest day
+                        model.add(seventh_day_not_working == 1).only_enforce_if(six_consecutive_holidays)
+        
         # Sliding window constraint: in any 14-day period, maintain the specified work-to-rest ratio
         window_size = 14
         # Calculate max work days based on the ratio: work / (work + rest) = ratio
