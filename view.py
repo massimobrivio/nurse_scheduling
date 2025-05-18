@@ -618,6 +618,7 @@ class SchedulingView:
                 num_holidays = holiday_days[nurse_id] if nurse_id in holiday_days else 0
                 max_ot_shifts = config.get('max_overhours', 1)
                 max_ot_hours = max_ot_shifts * 8
+                pref_percentage = hours_worked.get(f'{nurse_id}_pref_percentage', 0)
                 
                 summary_data.append({
                     'Infermiere': f"Infermiere {nurse_id + 1}",
@@ -628,7 +629,8 @@ class SchedulingView:
                     'Giorni Ferie': num_holidays,
                     'Weekend Liberi': actual_weekends,
                     'Weekends Minimi': target_weekends,
-                    'Weekends OK': actual_weekends >= target_weekends
+                    'Weekends OK': actual_weekends >= target_weekends,
+                    'Preferenze Soddisfatte': f"{pref_percentage}%"
                 })
             
             summary_df = pd.DataFrame(summary_data)
@@ -649,6 +651,10 @@ class SchedulingView:
                     'Weekends Minimi': st.column_config.NumberColumn(width="small"),
                     'Weekends OK': st.column_config.CheckboxColumn(
                         help="Indica se il numero di weekend liberi soddisfa il requisito minimo"
+                    ),
+                    'Preferenze Soddisfatte': st.column_config.TextColumn(
+                        help="Percentuale di preferenze (Si/No) soddisfatte nella pianificazione",
+                        width="small"
                     )
                 },
                 hide_index=True,

@@ -313,29 +313,73 @@ class SchedulingModel:
                             # Add a penalty for assigning shifts against preferences
                             objective_terms.append(-shifts[(n, d, s)] * nurse_pref_scale)
         
-        # 2. Assignment costs - MINIMIZE (40% weight)
+        # 2. Assignment costs - MINIMIZE (35% weight)
         # We'll negate these terms since we're maximizing the objective
         # Regular nurse hours
         for n in all_nurses:
             regular_shifts_cost = regular_hours[n] * self.nurse_regular_cost
-            objective_terms.append(-regular_shifts_cost * 40)  # Negative because we want to minimize cost
+            objective_terms.append(-regular_shifts_cost * 35)  # Negative because we want to minimize cost
         
         # Nurse overhours
         for n in all_nurses:
             overhours_cost = overtime_hours[n] * self.nurse_overhours_cost
-            objective_terms.append(-overhours_cost * 40)  # Negative because we want to minimize cost
+            objective_terms.append(-overhours_cost * 35)  # Negative because we want to minimize cost
         
         # Freelancer costs
         for f in range(self.num_nurses, self.num_nurses + self.num_freelancers):
             freelancer_shifts = sum(shifts[(f, d, s)] for d in all_days for s in all_shifts)
             freelancer_cost = freelancer_shifts * self.freelancer_cost
-            objective_terms.append(-freelancer_cost * 40)  # Negative because we want to minimize cost
+            objective_terms.append(-freelancer_cost * 35)  # Negative because we want to minimize cost
         
-        # 3. Free weekends - MAXIMIZE (30% weight)
-        free_weekends_scale = 3000.0 / max_free_weekends
+        # 3. Free weekends - MAXIMIZE (25% weight)
+        free_weekends_scale = 2500.0 / max_free_weekends
         for n in all_nurses:
             for is_free in weekend_is_free.get(n, []):
                 objective_terms.append(is_free * free_weekends_scale)
+                
+        # 4. Freelancer shift balance - MAXIMIZE (10% weight)
+        if self.num_freelancers > 1:
+            # Create variables to track freelancer shifts
+            freelancer_shifts = {}
+            for f_idx in range(self.num_freelancers):
+                f = self.num_nurses + f_idx
+                freelancer_shifts[f_idx] = sum(shifts[(f, d, s)] for d in all_days for s in all_shifts)
+            
+            # Create variables for min and max shifts
+            min_shifts = model.new_int_var(0, self.num_days * len(all_shifts), "min_freelancer_shifts")
+            max_shifts = model.new_int_var(0, self.num_days * len(all_shifts), "max_freelancer_shifts")
+            
+            # Set min_shifts to be the minimum number of shifts assigned to any freelancer
+            for f_idx in range(self.num_freelancers):
+                model.add(min_shifts <= freelancer_shifts[f_idx])
+            
+            # Set max_shifts to be the maximum number of shifts assigned to any freelancer
+            for f_idx in range(self.num_freelancers):
+                model.add(max_shifts >= freelancer_shifts[f_idx])
+            
+            # Penalize the difference between min and max
+            # We want to maximize min_shifts and minimize max_shifts to get a balanced distribution
+            # Pre-calculate scaling factors to avoid division in the objective terms
+            per_day_scale = 1000.0 / max(1, self.num_days)  # 10% weight, scaled by days
+            objective_terms.append(min_shifts * per_day_scale)  # Encourage higher minimum
+            objective_terms.append(-max_shifts * per_day_scale)  # Discourage higher maximum
+            
+            # Additionally, reward when freelancers have similar number of shifts
+            # For each pair of freelancers, add a penalty proportional to the difference in shifts
+            if self.num_freelancers > 2:
+                # Pre-calculate the scaling factor
+                pair_scale = 1000.0 / max(1, self.num_freelancers * self.num_days)
+                
+                for f1 in range(self.num_freelancers):
+                    for f2 in range(f1 + 1, self.num_freelancers):
+                        # Create a variable for the absolute difference in shifts
+                        diff = model.new_int_var(0, self.num_days * len(all_shifts), f"shift_diff_f{f1}_f{f2}")
+                        
+                        # Set diff to |shifts[f1] - shifts[f2]|
+                        model.add_absolute_value(diff, freelancer_shifts[f1] - freelancer_shifts[f2])
+                        
+                        # Penalize differences
+                        objective_terms.append(-diff * pair_scale)
         
         # Add the objective function
         if objective_terms:
@@ -446,19 +490,77 @@ class SchedulingModel:
                     if sat_free and sun_free:
                         free_weekends[n] += 1
             
+            # Calculate preference satisfaction for each nurse
+            preference_satisfaction = {n: {"total": 0, "satisfied": 0, "percentage": 0} for n in all_nurses}
+            
+            for n in all_nurses:
+                total_prefs = 0
+                satisfied_prefs = 0
+                
+                for d in all_days:
+                    for s in all_shifts:
+                        day_key = (d + 1, self.shifts[s])  # Convert to 1-indexed days
+                        
+                        if day_key in self.nurse_preferences[n]:
+                            pref_value = self.nurse_preferences[n][day_key]
+                            
+                            # Only count preferences to work (1) or not to work (-1)
+                            # Don't count holidays (2) as they are enforced constraints
+                            if pref_value == 1 or pref_value == -1:
+                                total_prefs += 1
+                                
+                                # Check if the preference was satisfied
+                                assigned = solver.value(shifts[(n, d, s)]) == 1
+                                
+                                if (pref_value == 1 and assigned) or (pref_value == -1 and not assigned):
+                                    satisfied_prefs += 1
+                
+                preference_satisfaction[n]["total"] = total_prefs
+                preference_satisfaction[n]["satisfied"] = satisfied_prefs
+                
+                # Calculate percentage (avoid division by zero)
+                if total_prefs > 0:
+                    preference_satisfaction[n]["percentage"] = round((satisfied_prefs / total_prefs) * 100, 1)
+                else:
+                    preference_satisfaction[n]["percentage"] = 100  # If no preferences, consider 100% satisfied
+            
+            # Add preference satisfaction to hours_worked dictionary
+            for n in all_nurses:
+                hours_worked[f"{n}_pref_percentage"] = preference_satisfaction[n]["percentage"]
+            
             # Calculate costs
             nurse_regular_cost_total = sum(regular_hours_worked[n] // self.shift_duration * self.nurse_regular_cost for n in all_nurses)
             nurse_overtime_cost_total = sum(overhours_worked[n] // self.shift_duration * self.nurse_overhours_cost for n in all_nurses)
             
             freelancer_shifts_total = 0
-            for f in range(self.num_nurses, self.num_nurses + self.num_freelancers):
+            
+            # Calculate freelancer usage and availability statistics
+            for f_idx in range(self.num_freelancers):
+                f = self.num_nurses + f_idx
+                freelancer_shifts_count = 0
                 for d in all_days:
                     for s in all_shifts:
                         if solver.value(shifts[(f, d, s)]) == 1:
-                            freelancer_shifts_total += 1
+                            freelancer_shifts_count += 1
+                
+                freelancer_shifts_total += freelancer_shifts_count
+                
+                # Calculate availability usage percentage
+                available_slots = 0
+                if f_idx in self.freelancer_availability:
+                    available_slots = len(self.freelancer_availability[f_idx])
+                
+                # Store freelancer-specific data in hours_worked
+                hours_worked[f'freelancer_{f_idx}_shifts'] = freelancer_shifts_count
+                hours_worked[f'freelancer_{f_idx}_hours'] = freelancer_shifts_count * self.shift_duration
+                
+                if available_slots > 0:
+                    availability_usage = round((freelancer_shifts_count / available_slots) * 100, 1)
+                    hours_worked[f'freelancer_{f_idx}_availability_usage'] = availability_usage
+                else:
+                    hours_worked[f'freelancer_{f_idx}_availability_usage'] = 0
             
             freelancer_cost_total = freelancer_shifts_total * self.freelancer_cost
-            total_cost = nurse_regular_cost_total + nurse_overtime_cost_total + freelancer_cost_total
             
             # Print summary information
             print("Ore lavorate per infermiere:")
@@ -475,13 +577,13 @@ class SchedulingModel:
             print(f"Costo infermieri (ore regolari): {nurse_regular_cost_total}")
             print(f"Costo infermieri (ore straordinario): {nurse_overtime_cost_total}")
             print(f"Costo liberi professionisti: {freelancer_cost_total}")
-            print(f"Costo totale: {total_cost}")
+            print(f"Costo totale: {nurse_regular_cost_total + nurse_overtime_cost_total + freelancer_cost_total}")
             
             # Store cost information in hours_worked dictionary to return it
             hours_worked['regular_cost'] = nurse_regular_cost_total
             hours_worked['overtime_cost'] = nurse_overtime_cost_total
             hours_worked['freelancer_cost'] = freelancer_cost_total
-            hours_worked['total_cost'] = total_cost
+            hours_worked['total_cost'] = nurse_regular_cost_total + nurse_overtime_cost_total + freelancer_cost_total
             
             # Also track regular and overtime hours
             for n in all_nurses:
@@ -515,39 +617,81 @@ class SchedulingModel:
                 actual_weekends = free_weekends[nurse_id] if nurse_id in free_weekends else 0
                 num_holidays = holiday_days[nurse_id] if holiday_days and nurse_id in holiday_days else 0
                 hours_diff = actual_hours - target_hours
-                flex = hours_flexibility if hours_flexibility is not None else 0
+                
+                # Get preference satisfaction percentage
+                pref_percentage = hours_worked.get(f"{nurse_id}_pref_percentage", 0)
                 
                 summary_data.append({
                     'Infermiere': f"Infermiere {nurse_id + 1}",
                     'Ore Contrattuali': target_hours,
                     'Ore Pianificate': actual_hours,
                     'Differenza Ore': hours_diff,
-                    'Entro Flessibilità': "Sì" if abs(hours_diff) <= flex else "No",
                     'Giorni Ferie': num_holidays,
                     'Weekend Liberi': actual_weekends,
                     'Weekends Minimi': target_weekends,
-                    'Weekends OK': "Sì" if actual_weekends >= target_weekends else "No"
+                    'Preferenze Soddisfatte': f"{pref_percentage}%"
                 })
             
             summary_df = pd.DataFrame(summary_data)
-            summary_df.to_excel(writer, sheet_name='Riepilogo', index=False)
+            summary_df.to_excel(writer, sheet_name='Riepilogo Infermiere', index=False)
+            
+            # Create freelancer summary if we have any freelancers
+            num_freelancers = sum(1 for col in schedule_df.columns if "Libero Professionista" in col)
+            if num_freelancers > 0:
+                freelancer_summary_data = []
+                
+                for f_idx in range(num_freelancers):
+                    freelancer_col = f"Libero Professionista {f_idx+1}"
+                    total_shifts = 0
+                    morning_shifts = 0
+                    afternoon_shifts = 0
+                    
+                    # Count shifts
+                    for _, row in schedule_df.iterrows():
+                        if freelancer_col in row:
+                            shift_value = row[freelancer_col]
+                            if shift_value == "M":
+                                total_shifts += 1
+                                morning_shifts += 1
+                            elif shift_value == "P":
+                                total_shifts += 1
+                                afternoon_shifts += 1
+                    
+                    # Calculate total hours (8 hours per shift)
+                    total_hours = total_shifts * 8
+                    
+                    # Calculate availability usage if available in hours_worked
+                    availability_usage = hours_worked.get(f"freelancer_{f_idx}_availability_usage", "N/A")
+                    if availability_usage != "N/A":
+                        availability_usage = f"{availability_usage}%"
+                    
+                    freelancer_summary_data.append({
+                        'Libero Professionista': freelancer_col,
+                        'Turni Totali': total_shifts,
+                        'Turni Mattina': morning_shifts,
+                        'Turni Pomeriggio': afternoon_shifts,
+                        'Ore Totali': total_hours,
+                        'Disponibilità Usata': availability_usage
+                    })
+                
+                freelancer_summary_df = pd.DataFrame(freelancer_summary_data)
+                freelancer_summary_df.to_excel(writer, sheet_name='Riepilogo Liberi Professionisti', index=False)
         
         # Add hours worked sheet (legacy)
         if hours_worked and nurse_hours:
             # Create a DataFrame for hours worked
             hours_data = []
             for nurse_id, hours in hours_worked.items():
-                target_hours = nurse_hours[nurse_id]
-                flex = hours_flexibility if hours_flexibility is not None else 0
-                diff = hours - target_hours
-                
-                hours_data.append({
-                    'Infermiere': f"Infermiere {nurse_id + 1}",
-                    'Ore Contrattuali': target_hours,
-                    'Ore Lavorate': hours,
-                    'Differenza': diff,
-                    'Entro Flessibilità': "Sì" if abs(diff) <= flex else "No"
-                })
+                if isinstance(nurse_id, int):  # Skip special keys
+                    target_hours = nurse_hours[nurse_id]
+                    diff = hours - target_hours
+                    
+                    hours_data.append({
+                        'Infermiere': f"Infermiere {nurse_id + 1}",
+                        'Ore Contrattuali': target_hours,
+                        'Ore Lavorate': hours,
+                        'Differenza': diff,
+                    })
             
             hours_df = pd.DataFrame(hours_data)
             hours_df.to_excel(writer, sheet_name='Ore Lavorate', index=False)
@@ -626,48 +770,37 @@ class SchedulingModel:
         
         # Format the summary sheet if available
         if hours_worked and nurse_hours and free_weekends:
-            summary_worksheet = writer.sheets['Riepilogo']
+            summary_worksheet = writer.sheets['Riepilogo Infermiere']
             
             # Set column widths
             summary_worksheet.set_column('A:A', 15)  # Infermiere
             summary_worksheet.set_column('B:B', 15)  # Ore Contrattuali
             summary_worksheet.set_column('C:C', 15)  # Ore Pianificate
             summary_worksheet.set_column('D:D', 15)  # Differenza Ore
-            summary_worksheet.set_column('E:E', 15)  # Entro Flessibilità
             summary_worksheet.set_column('F:F', 15)  # Giorni Ferie
             summary_worksheet.set_column('G:G', 15)  # Weekend Liberi
-            summary_worksheet.set_column('H:H', 15)  # Weekends Minimi
-            summary_worksheet.set_column('I:I', 15)  # Weekends OK
+            summary_worksheet.set_column('H:H', 15)  # Weekend Minimi
+            summary_worksheet.set_column('J:J', 15)  # Preferenze Soddisfatte
             
             # Set the header format
             for col_num, value in enumerate(summary_df.columns.values):
                 summary_worksheet.write(0, col_num, value, header_format)
             
-            # Define formats for conditional formatting
-            good_format = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100'})
-            bad_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
-            
-            # Apply conditional formatting to the "Entro Flessibilità" column
-            summary_worksheet.conditional_format('E2:E100', {'type': 'cell',
-                                                          'criteria': '==',
-                                                          'value': '"Sì"',
-                                                          'format': good_format})
-            
-            summary_worksheet.conditional_format('E2:E100', {'type': 'cell',
-                                                          'criteria': '==',
-                                                          'value': '"No"',
-                                                          'format': bad_format})
-            
-            # Apply conditional formatting to the "Weekends OK" column
-            summary_worksheet.conditional_format('I2:I100', {'type': 'cell',
-                                                          'criteria': '==',
-                                                          'value': '"Sì"',
-                                                          'format': good_format})
-            
-            summary_worksheet.conditional_format('I2:I100', {'type': 'cell',
-                                                         'criteria': '==',
-                                                         'value': '"No"',
-                                                         'format': bad_format})
+            # Format freelancer summary if available
+            if num_freelancers > 0 and 'Riepilogo Liberi Professionisti' in writer.sheets:
+                freelancer_worksheet = writer.sheets['Riepilogo Liberi Professionisti']
+                
+                # Set column widths
+                freelancer_worksheet.set_column('A:A', 20)  # Libero Professionista
+                freelancer_worksheet.set_column('B:B', 15)  # Turni Totali
+                freelancer_worksheet.set_column('C:C', 15)  # Turni Mattina
+                freelancer_worksheet.set_column('D:D', 15)  # Turni Pomeriggio
+                freelancer_worksheet.set_column('E:E', 15)  # Ore Totali
+                freelancer_worksheet.set_column('F:F', 20)  # Disponibilità Usata
+                
+                # Set the header format
+                for col_num, value in enumerate(freelancer_summary_df.columns.values):
+                    freelancer_worksheet.write(0, col_num, value, header_format)
         
         # Format the hours worked sheet if available
         if hours_worked and nurse_hours:
@@ -683,21 +816,6 @@ class SchedulingModel:
             # Set the header format
             for col_num, value in enumerate(hours_df.columns.values):
                 hours_worksheet.write(0, col_num, value, header_format)
-            
-            # Define conditional formatting
-            good_format = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100'})
-            bad_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
-            
-            # Apply conditional formatting to the "Entro Flessibilità" column
-            hours_worksheet.conditional_format('E2:E100', {'type': 'cell',
-                                                         'criteria': '==',
-                                                         'value': '"Sì"',
-                                                         'format': good_format})
-            
-            hours_worksheet.conditional_format('E2:E100', {'type': 'cell',
-                                                         'criteria': '==',
-                                                         'value': '"No"',
-                                                         'format': bad_format})
         
         writer.close()
         return filename
@@ -755,22 +873,65 @@ class SchedulingModel:
                 actual_weekends = free_weekends[nurse_id] if nurse_id in free_weekends else 0
                 num_holidays = holiday_days[nurse_id] if holiday_days and nurse_id in holiday_days else 0
                 hours_diff = actual_hours - target_hours
-                flex = hours_flexibility if hours_flexibility is not None else 0
+                
+                # Get preference satisfaction percentage
+                pref_percentage = hours_worked.get(f"{nurse_id}_pref_percentage", 0)
                 
                 summary_data.append({
                     'Infermiere': f"Infermiere {nurse_id + 1}",
                     'Ore Contrattuali': target_hours,
                     'Ore Pianificate': actual_hours,
                     'Differenza Ore': hours_diff,
-                    'Entro Flessibilità': "Sì" if abs(hours_diff) <= flex else "No",
                     'Giorni Ferie': num_holidays,
                     'Weekend Liberi': actual_weekends,
                     'Weekends Minimi': target_weekends,
-                    'Weekends OK': "Sì" if actual_weekends >= target_weekends else "No"
+                    'Preferenze Soddisfatte': f"{pref_percentage}%"
                 })
             
             summary_df = pd.DataFrame(summary_data)
-            summary_df.to_excel(writer, sheet_name='Riepilogo', index=False)
+            summary_df.to_excel(writer, sheet_name='Riepilogo Infermiere', index=False)
+            
+            # Create freelancer summary if we have any freelancers
+            num_freelancers = sum(1 for col in schedule_df.columns if "Libero Professionista" in col)
+            if num_freelancers > 0:
+                freelancer_summary_data = []
+                
+                for f_idx in range(num_freelancers):
+                    freelancer_col = f"Libero Professionista {f_idx+1}"
+                    total_shifts = 0
+                    morning_shifts = 0
+                    afternoon_shifts = 0
+                    
+                    # Count shifts
+                    for _, row in schedule_df.iterrows():
+                        if freelancer_col in row:
+                            shift_value = row[freelancer_col]
+                            if shift_value == "M":
+                                total_shifts += 1
+                                morning_shifts += 1
+                            elif shift_value == "P":
+                                total_shifts += 1
+                                afternoon_shifts += 1
+                    
+                    # Calculate total hours (8 hours per shift)
+                    total_hours = total_shifts * 8
+                    
+                    # Calculate availability usage if available in hours_worked
+                    availability_usage = hours_worked.get(f"freelancer_{f_idx}_availability_usage", "N/A")
+                    if availability_usage != "N/A":
+                        availability_usage = f"{availability_usage}%"
+                    
+                    freelancer_summary_data.append({
+                        'Libero Professionista': freelancer_col,
+                        'Turni Totali': total_shifts,
+                        'Turni Mattina': morning_shifts,
+                        'Turni Pomeriggio': afternoon_shifts,
+                        'Ore Totali': total_hours,
+                        'Disponibilità Usata': availability_usage
+                    })
+                
+                freelancer_summary_df = pd.DataFrame(freelancer_summary_data)
+                freelancer_summary_df.to_excel(writer, sheet_name='Riepilogo Liberi Professionisti', index=False)
         
         # Format the Excel file
         workbook = writer.book
@@ -882,48 +1043,37 @@ class SchedulingModel:
         
         # Format the summary sheet if available
         if hours_worked and nurse_hours and free_weekends:
-            summary_worksheet = writer.sheets['Riepilogo']
+            summary_worksheet = writer.sheets['Riepilogo Infermiere']
             
             # Set column widths
             summary_worksheet.set_column('A:A', 15)  # Infermiere
             summary_worksheet.set_column('B:B', 15)  # Ore Contrattuali
             summary_worksheet.set_column('C:C', 15)  # Ore Pianificate
             summary_worksheet.set_column('D:D', 15)  # Differenza Ore
-            summary_worksheet.set_column('E:E', 15)  # Entro Flessibilità
             summary_worksheet.set_column('F:F', 15)  # Giorni Ferie
             summary_worksheet.set_column('G:G', 15)  # Weekend Liberi
-            summary_worksheet.set_column('H:H', 15)  # Weekends Minimi
-            summary_worksheet.set_column('I:I', 15)  # Weekends OK
+            summary_worksheet.set_column('H:H', 15)  # Weekend Minimi
+            summary_worksheet.set_column('J:J', 15)  # Preferenze Soddisfatte
             
             # Set the header format
             for col_num, value in enumerate(summary_df.columns.values):
                 summary_worksheet.write(0, col_num, value, header_format)
             
-            # Define formats for conditional formatting
-            good_format = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100'})
-            bad_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
-            
-            # Apply conditional formatting to the "Entro Flessibilità" column
-            summary_worksheet.conditional_format('E2:E100', {'type': 'cell',
-                                                          'criteria': '==',
-                                                          'value': '"Sì"',
-                                                          'format': good_format})
-            
-            summary_worksheet.conditional_format('E2:E100', {'type': 'cell',
-                                                          'criteria': '==',
-                                                          'value': '"No"',
-                                                          'format': bad_format})
-            
-            # Apply conditional formatting to the "Weekends OK" column
-            summary_worksheet.conditional_format('I2:I100', {'type': 'cell',
-                                                          'criteria': '==',
-                                                          'value': '"Sì"',
-                                                          'format': good_format})
-            
-            summary_worksheet.conditional_format('I2:I100', {'type': 'cell',
-                                                         'criteria': '==',
-                                                         'value': '"No"',
-                                                         'format': bad_format})
+            # Format freelancer summary if available
+            if num_freelancers > 0 and 'Riepilogo Liberi Professionisti' in writer.sheets:
+                freelancer_worksheet = writer.sheets['Riepilogo Liberi Professionisti']
+                
+                # Set column widths
+                freelancer_worksheet.set_column('A:A', 20)  # Libero Professionista
+                freelancer_worksheet.set_column('B:B', 15)  # Turni Totali
+                freelancer_worksheet.set_column('C:C', 15)  # Turni Mattina
+                freelancer_worksheet.set_column('D:D', 15)  # Turni Pomeriggio
+                freelancer_worksheet.set_column('E:E', 15)  # Ore Totali
+                freelancer_worksheet.set_column('F:F', 20)  # Disponibilità Usata
+                
+                # Set the header format
+                for col_num, value in enumerate(freelancer_summary_df.columns.values):
+                    freelancer_worksheet.write(0, col_num, value, header_format)
         
         writer.close()
         
