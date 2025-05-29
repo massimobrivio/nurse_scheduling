@@ -181,58 +181,6 @@ class SchedulingModel:
                             consecutive_shifts.append(shifts[(e, d, s)])
                 model.add(sum(consecutive_shifts) <= self.max_consecutive_days)
         
-        # Maximum consecutive holiday days (6) before requiring a rest day for nurses
-        max_consecutive_holidays = 6
-        for n in all_nurses:
-            for start_day in range(self.num_days - max_consecutive_holidays):
-                # Check sequential holiday days
-                holiday_sequence = []
-                
-                # Collect holiday status for each day in the sequence
-                for d in range(start_day, start_day + max_consecutive_holidays + 1):
-                    if d < self.num_days:  # Ensure we don't go beyond the month
-                        # A day is considered a holiday if either morning or afternoon shift is marked as holiday (2)
-                        day_is_holiday = model.new_bool_var(f"day_is_holiday_n{n}_d{d}")
-                        
-                        morning_key = (d + 1, 'M')  # Convert to 1-indexed days
-                        afternoon_key = (d + 1, 'P')  # Convert to 1-indexed days
-                        
-                        morning_holiday = (morning_key in self.nurse_preferences[n] and 
-                                          self.nurse_preferences[n][morning_key] == 2)
-                        afternoon_holiday = (afternoon_key in self.nurse_preferences[n] and 
-                                            self.nurse_preferences[n][afternoon_key] == 2)
-                        
-                        # day_is_holiday is 1 if either morning or afternoon is a holiday
-                        if morning_holiday or afternoon_holiday:
-                            model.add(day_is_holiday == 1)
-                        else:
-                            model.add(day_is_holiday == 0)
-                        
-                        holiday_sequence.append(day_is_holiday)
-                
-                # If we have 7 days to check (max_consecutive_holidays + 1)
-                if len(holiday_sequence) == max_consecutive_holidays + 1:
-                    # Create a variable for if we have 6 consecutive holiday days
-                    six_consecutive_holidays = model.new_bool_var(f"six_holidays_n{n}_start{start_day}")
-                    
-                    # six_consecutive_holidays is 1 if and only if the first 6 days are all holidays
-                    model.add(sum(holiday_sequence[:max_consecutive_holidays]) >= max_consecutive_holidays).only_enforce_if(six_consecutive_holidays)
-                    model.add(sum(holiday_sequence[:max_consecutive_holidays]) < max_consecutive_holidays).only_enforce_if(six_consecutive_holidays.Not())
-                    
-                    # If we have 6 consecutive holidays, the 7th day must be a rest day (not a work day, not a holiday)
-                    seventh_day_idx = start_day + max_consecutive_holidays
-                    if seventh_day_idx < self.num_days:
-                        # 7th day is not a holiday
-                        model.add(holiday_sequence[-1] == 0).only_enforce_if(six_consecutive_holidays)
-                        
-                        # 7th day is not a work day (no shifts assigned)
-                        seventh_day_not_working = model.new_bool_var(f"seventh_day_not_working_n{n}_start{start_day}")
-                        model.add(sum(shifts[(n, seventh_day_idx, s)] for s in all_shifts) == 0).only_enforce_if(seventh_day_not_working)
-                        model.add(sum(shifts[(n, seventh_day_idx, s)] for s in all_shifts) > 0).only_enforce_if(seventh_day_not_working.Not())
-                        
-                        # If we have 6 consecutive holidays, 7th day must be a rest day
-                        model.add(seventh_day_not_working == 1).only_enforce_if(six_consecutive_holidays)
-        
         # Sliding window constraint: in any 14-day period, maintain the specified work-to-rest ratio
         window_size = 14
         # Calculate max work days based on the ratio: work / (work + rest) = ratio
@@ -337,49 +285,43 @@ class SchedulingModel:
             for is_free in weekend_is_free.get(n, []):
                 objective_terms.append(is_free * free_weekends_scale)
                 
-        # 4. Freelancer shift balance - MAXIMIZE (10% weight)
+        # 4. Freelancer shift balance - MINIMIZE squared differences (10% weight)
         if self.num_freelancers > 1:
             # Create variables to track freelancer shifts
             freelancer_shifts = {}
             for f_idx in range(self.num_freelancers):
                 f = self.num_nurses + f_idx
                 freelancer_shifts[f_idx] = sum(shifts[(f, d, s)] for d in all_days for s in all_shifts)
-            
-            # Create variables for min and max shifts
-            min_shifts = model.new_int_var(0, self.num_days * len(all_shifts), "min_freelancer_shifts")
-            max_shifts = model.new_int_var(0, self.num_days * len(all_shifts), "max_freelancer_shifts")
-            
-            # Set min_shifts to be the minimum number of shifts assigned to any freelancer
-            for f_idx in range(self.num_freelancers):
-                model.add(min_shifts <= freelancer_shifts[f_idx])
-            
-            # Set max_shifts to be the maximum number of shifts assigned to any freelancer
-            for f_idx in range(self.num_freelancers):
-                model.add(max_shifts >= freelancer_shifts[f_idx])
-            
-            # Penalize the difference between min and max
-            # We want to maximize min_shifts and minimize max_shifts to get a balanced distribution
-            # Pre-calculate scaling factors to avoid division in the objective terms
-            per_day_scale = 1000.0 / max(1, self.num_days)  # 10% weight, scaled by days
-            objective_terms.append(min_shifts * per_day_scale)  # Encourage higher minimum
-            objective_terms.append(-max_shifts * per_day_scale)  # Discourage higher maximum
-            
-            # Additionally, reward when freelancers have similar number of shifts
-            # For each pair of freelancers, add a penalty proportional to the difference in shifts
-            if self.num_freelancers > 2:
-                # Pre-calculate the scaling factor
-                pair_scale = 1000.0 / max(1, self.num_freelancers * self.num_days)
-                
-                for f1 in range(self.num_freelancers):
-                    for f2 in range(f1 + 1, self.num_freelancers):
-                        # Create a variable for the absolute difference in shifts
-                        diff = model.new_int_var(0, self.num_days * len(all_shifts), f"shift_diff_f{f1}_f{f2}")
-                        
-                        # Set diff to |shifts[f1] - shifts[f2]|
-                        model.add_absolute_value(diff, freelancer_shifts[f1] - freelancer_shifts[f2])
-                        
-                        # Penalize differences
-                        objective_terms.append(-diff * pair_scale)
+
+            # Penalize the sum of squared differences between pairs of freelancers
+            # This encourages freelancers to have a similar number of shifts.
+            # Penalty = sum_{i<j} (shifts[i] - shifts[j])^2
+            # We want to minimize this, so add a negative term to the objective.
+            # The scaling factor helps to control the impact of this penalty.
+            # A smaller scaling factor means a stronger push towards equal shifts.
+            # 10% weight, scaled by the max possible sum of squared differences.
+            # Max shifts per freelancer is self.num_days. Max squared diff for a pair is (self.num_days)^2.
+            max_possible_squared_diff_sum = (self.num_freelancers * (self.num_freelancers - 1) / 2) * (self.num_days)**2
+            freelancer_balance_scale = 1000.0 / max(1, max_possible_squared_diff_sum)
+
+
+            for f1 in range(self.num_freelancers):
+                for f2 in range(f1 + 1, self.num_freelancers):
+                    # Create a variable for the difference in shifts
+                    diff = model.new_int_var(-self.num_days, 
+                                             self.num_days, 
+                                             f"shift_diff_f{f1}_f{f2}")
+                    model.add(diff == freelancer_shifts[f1] - freelancer_shifts[f2])
+                    
+                    # Create a variable for the squared difference
+                    diff_sq = model.new_int_var(0, (self.num_days)**2, f"shift_diff_sq_f{f1}_f{f2}")
+                    
+                    # Add constraint: diff_sq = diff * diff.
+                    # This is a non-linear constraint. CP-SAT can handle it via AddMultiplicationEquality.
+                    model.add_multiplication_equality(diff_sq, [diff, diff])
+                    
+                    # Penalize squared differences
+                    objective_terms.append(-diff_sq * freelancer_balance_scale)
         
         # Add the objective function
         if objective_terms:
